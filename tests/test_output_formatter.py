@@ -8,11 +8,37 @@ from arxiv2md.schemas import SectionNode
 
 def _make_sections() -> list[SectionNode]:
     """Create a minimal section tree for testing."""
-    child = SectionNode(title="1.1 Background", level=3, html="<p>Background info.</p>")
+    child = SectionNode(
+        title="1.1 Background",
+        level=3,
+        anchor="S1.SS1",
+        html="<p>Background info.</p>",
+    )
     return [
-        SectionNode(title="1 Introduction", level=2, html="<p>Intro text.</p>", children=[child]),
+        SectionNode(
+            title="1 Introduction",
+            level=2,
+            anchor="S1",
+            html="<p>Intro text.</p>",
+            children=[child],
+        ),
         SectionNode(title="2 Methods", level=2, html="<p>Methods text.</p>"),
     ]
+
+
+def test_section_anchors_are_emitted_before_their_headings() -> None:
+    result = format_paper(
+        arxiv_id="2501.11120",
+        version=None,
+        title="Test Paper",
+        authors=[],
+        abstract=None,
+        sections=_make_sections(),
+        include_toc=False,
+    )
+    assert '<a id="S1"></a>\n\n## 1 Introduction' in result.content
+    assert '<a id="S1.SS1"></a>\n\n### 1.1 Background' in result.content
+    assert '<a id="S2"></a>' not in result.content
 
 
 def test_frontmatter_disabled_by_default() -> None:

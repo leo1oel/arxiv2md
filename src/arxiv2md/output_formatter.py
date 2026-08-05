@@ -131,6 +131,8 @@ def _render_content(
 def _render_section(section: SectionNode) -> list[str]:
     blocks: list[str] = []
     heading_prefix = "#" * min(section.level, 6)
+    if section.anchor:
+        blocks.append(f'<a id="{section.anchor}"></a>')
     blocks.append(f"{heading_prefix} {section.title}")
     if section.markdown:
         blocks.append(section.markdown)
