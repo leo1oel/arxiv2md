@@ -179,7 +179,7 @@ def test_resolve_relative_image_urls() -> None:
     """
 
     result = convert_fragment_to_markdown(html, base_url="https://arxiv.org/html/2501.11120v1")
-    assert "https://arxiv.org/html/2501.11120v1/extracted/figures/fig1.png" in result
+    assert "https://arxiv.org/html/extracted/figures/fig1.png" in result
     assert "Figure 1: System overview" in result
 
 
@@ -206,3 +206,34 @@ def test_no_base_url_preserves_relative_paths() -> None:
 
     result = convert_fragment_to_markdown(html)
     assert "extracted/fig1.png" in result
+
+
+def test_latexml_equation_group_has_structured_displays_without_nested_dollars() -> None:
+    html = """
+    <table class="ltx_equationgroup" id="S2.EG1"><tbody id="S2.E1">
+      <tr><td><math class="ltx_Math" alttext="fallback">
+        <annotation encoding="application/x-tex">$$a &amp;= b + c$$</annotation>
+      </math></td><td class="ltx_eqn_number">(3)</td></tr></tbody>
+      <tbody id="S2.E2"><tr><td><math alttext="d = e"/></td><td class="ltx_tag">(4)</td></tr></tbody>
+    </table>
+    """
+    result = convert_fragment_to_markdown(html)
+    assert '<a id="S2.EG1"></a>' in result
+    assert '<a id="S2.E1"></a>' in result
+    assert '<a id="S2.E2"></a>' in result
+    assert result.count("$$") == 4
+    assert "$$a" not in result and "c$$" not in result
+    assert "a &= b + c" in result and "d = e" in result
+    assert "\\tag{3}" in result and "\\tag{4}" in result
+
+
+def test_figure_preserves_anchor_caption_and_all_images_as_markdown() -> None:
+    html = """
+    <figure id="S1.F1"><img src="a.png" alt="First"><img src="b.png" alt="Second">
+      <figcaption>Figure 1: Two panels.</figcaption></figure>
+    """
+    result = convert_fragment_to_markdown(html, base_url="https://ar5iv.labs.arxiv.org/html/1234.5678")
+    assert result.startswith('<a id="S1.F1"></a>')
+    assert "![First](https://ar5iv.labs.arxiv.org/html/a.png)" in result
+    assert "![Second](https://ar5iv.labs.arxiv.org/html/b.png)" in result
+    assert "*Figure 1: Two panels.*" in result

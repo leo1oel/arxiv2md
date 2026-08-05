@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
+from bs4 import BeautifulSoup
+
+from arxiv2md.assets import AssetMaterializer, resolve_asset_url
 from arxiv2md.fetch import fetch_arxiv_html
 from arxiv2md.html_parser import parse_arxiv_html
 from arxiv2md.markdown import convert_fragment_to_markdown
@@ -25,6 +30,7 @@ async def ingest_paper(
     section_filter_mode: str,
     sections: list[str],
     include_frontmatter: bool = False,
+    asset_materializer: AssetMaterializer | None = None,
 ) -> tuple[IngestionResult, dict[str, str | list[str] | None]]:
     """Fetch, parse, and serialize an arXiv paper into Markdown.
 
@@ -48,8 +54,14 @@ async def ingest_paper(
     else:  # include mode
         include_abstract = not sections or _ABSTRACT_TITLE in selected_lower
 
+    if asset_materializer:
+        asset_urls: list[str] = []
+        for section in filtered_sections:
+            _collect_asset_urls(section, source_url, asset_urls)
+        await asset_materializer.materialize(asset_urls)
+
     for section in filtered_sections:
-        _populate_section_markdown(section, remove_inline_citations=remove_inline_citations, base_url=source_url)
+        _populate_section_markdown(section, remove_inline_citations=remove_inline_citations, base_url=source_url, asset_materializer=asset_materializer)
 
     result = format_paper(
         arxiv_id=arxiv_id,
@@ -72,8 +84,16 @@ async def ingest_paper(
     return result, metadata
 
 
-def _populate_section_markdown(section, *, remove_inline_citations: bool = False, base_url: str | None = None) -> None:
+def _populate_section_markdown(section, *, remove_inline_citations: bool = False, base_url: str | None = None, asset_materializer: Callable[[str], str] | None = None) -> None:
     if section.html:
-        section.markdown = convert_fragment_to_markdown(section.html, remove_inline_citations=remove_inline_citations, base_url=base_url)
+        section.markdown = convert_fragment_to_markdown(section.html, remove_inline_citations=remove_inline_citations, base_url=base_url, asset_materializer=asset_materializer)
     for child in section.children:
-        _populate_section_markdown(child, remove_inline_citations=remove_inline_citations, base_url=base_url)
+        _populate_section_markdown(child, remove_inline_citations=remove_inline_citations, base_url=base_url, asset_materializer=asset_materializer)
+
+
+def _collect_asset_urls(section, base_url: str, urls: list[str]) -> None:
+    if section.html:
+        soup = BeautifulSoup(section.html, "html.parser")
+        urls.extend(resolve_asset_url(base_url, str(image["src"])) for image in soup.find_all("img", src=True))
+    for child in section.children:
+        _collect_asset_urls(child, base_url, urls)

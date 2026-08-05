@@ -7,6 +7,7 @@ import asyncio
 import sys
 from pathlib import Path
 
+from arxiv2md.assets import AssetMaterializer
 from arxiv2md.ingestion import ingest_paper
 from arxiv2md.query_parser import parse_arxiv_input
 
@@ -33,6 +34,11 @@ def main() -> None:
 async def _async_main(args: argparse.Namespace) -> None:
     query = parse_arxiv_input(args.input_text)
 
+    output_target = args.output if args.output is not None else DEFAULT_OUTPUT_FILE
+    if args.download_assets and output_target == "-":
+        raise ValueError("--download-assets requires a file output; stdout is not supported")
+    materializer = AssetMaterializer(Path(output_target)) if args.download_assets else None
+
     sections = _collect_sections(args.sections, args.section)
     result, _metadata = await ingest_paper(
         arxiv_id=query.arxiv_id,
@@ -45,6 +51,7 @@ async def _async_main(args: argparse.Namespace) -> None:
         section_filter_mode=args.section_filter_mode,
         sections=sections,
         include_frontmatter=args.frontmatter,
+        asset_materializer=materializer,
     )
 
     output_text = _format_output(
@@ -54,8 +61,6 @@ async def _async_main(args: argparse.Namespace) -> None:
         include_tree=args.include_tree,
         frontmatter=result.frontmatter,
     )
-    output_target = args.output if args.output is not None else DEFAULT_OUTPUT_FILE
-
     if output_target == "-":
         sys.stdout.write(output_text)
         if not output_text.endswith("\n"):
@@ -151,6 +156,11 @@ def _parse_args() -> argparse.Namespace:
         "--frontmatter",
         action="store_true",
         help="Prepend YAML frontmatter with paper metadata (title, authors, URL, etc.).",
+    )
+    parser.add_argument(
+        "--download-assets",
+        action="store_true",
+        help="Download figure images beside the output and emit local Markdown references.",
     )
     return parser.parse_args()
 

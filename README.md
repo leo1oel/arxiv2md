@@ -46,7 +46,14 @@ arxiv2md 2501.11120v1 --remove-refs --remove-toc -o -
 
 # Include YAML frontmatter with paper metadata
 arxiv2md 2501.11120v1 --frontmatter -o paper.md
+
+# Download validated raster figures to paper_assets/ and write its manifest
+arxiv2md 2501.11120v1 --download-assets -o paper.md
 ```
+
+`--download-assets` requires a file output and cannot be combined with `-o -`.
+Without this option, conversion performs no asset downloads and image references remain remote.
+For an output named `paper.md`, assets and the SHA-256 manifest are written under `paper_assets/`.
 
 ### REST API
 

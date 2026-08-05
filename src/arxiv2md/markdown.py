@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from urllib.parse import urljoin
 
 try:
@@ -57,7 +58,7 @@ def convert_html_to_markdown(html: str, *, remove_refs: bool = False, remove_toc
     return "\n\n".join(block for block in blocks if block).strip()
 
 
-def convert_fragment_to_markdown(html: str, *, remove_inline_citations: bool = False, base_url: str | None = None) -> str:
+def convert_fragment_to_markdown(html: str, *, remove_inline_citations: bool = False, base_url: str | None = None, asset_materializer: Callable[[str], str] | None = None) -> str:
     """Convert an HTML fragment into Markdown without title/author/abstract handling.
 
     Parameters
@@ -73,10 +74,14 @@ def convert_fragment_to_markdown(html: str, *, remove_inline_citations: bool = F
     """
     soup = BeautifulSoup(html, "html.parser")
     _strip_unwanted_elements(soup)
+    _convert_equation_tables(soup)
     convert_all_mathml_to_latex(soup)
     fix_tabular_tables(soup)
     if base_url:
         _resolve_image_urls(soup, base_url)
+    if asset_materializer:
+        for image in soup.find_all("img", src=True):
+            image["src"] = asset_materializer(str(image["src"]))
     blocks = _serialize_children(soup, remove_inline_citations=remove_inline_citations)
     return "\n\n".join(block for block in blocks if block).strip()
 
@@ -107,7 +112,10 @@ def convert_all_mathml_to_latex(root: BeautifulSoup) -> None:
             latex_source = re.sub(r"(?<!\\)%", "", latex_source)
             latex_source = re.sub(r"\\([_^])", r"\1", latex_source)
             latex_source = re.sub(r"\\(?=[\[\]])", "", latex_source)
-            math.replace_with(f"${latex_source}$")
+            display = math.get("display") == "block"
+            math.replace_with(f"$$\n{latex_source}\n$$" if display else f"${latex_source}$")
+        elif math.get("alttext"):
+            math.replace_with(f"${math['alttext'].strip()}$")
         else:
             math.replace_with(math.get_text(" ", strip=True))
 
@@ -122,9 +130,6 @@ def fix_tabular_tables(root: BeautifulSoup) -> None:
 
 def _resolve_image_urls(root: BeautifulSoup, base_url: str) -> None:
     """Resolve relative ``<img src>`` attributes to absolute URLs."""
-    # Ensure base_url ends with '/' so urljoin resolves relative paths correctly
-    if not base_url.endswith("/"):
-        base_url += "/"
     for img in root.find_all("img"):
         src = img.get("src")
         if src and not src.startswith(("http://", "https://", "data:")):
@@ -147,6 +152,9 @@ def _serialize_children(container: Tag, *, remove_inline_citations: bool = False
 
 
 def _serialize_block(tag: Tag, *, remove_inline_citations: bool = False) -> list[str]:
+    if "arxiv2md_equations" in tag.get("class", []):
+        return [tag.get_text()]
+
     if tag.name in {"section", "article", "div", "span"}:
         return _serialize_children(tag, remove_inline_citations=remove_inline_citations)
 
@@ -358,6 +366,61 @@ def _serialize_table(table: Tag, *, remove_inline_citations: bool = False) -> st
     return "\n".join(lines)
 
 
+def _convert_equation_tables(root: BeautifulSoup) -> None:
+    """Serialize LaTeXML equation groups before generic MathML replacement."""
+    for table in root.find_all("table", class_=_EQUATION_TABLE_RE):
+        rendered: list[str] = []
+        converted_rows = 0
+        if table.get("id"):
+            rendered.append(f'<a id="{table["id"]}"></a>')
+        for row in table.find_all("tr"):
+            number = row.find(class_=re.compile(r"ltx_tag|ltx_eqn_number"))
+            cells: list[str] = []
+            for cell in row.find_all(["td", "th"], recursive=False):
+                if number and (cell is number or number in cell.descendants):
+                    continue
+                parts = [_extract_math_tex(math) for math in cell.find_all("math")]
+                tex = " ".join(part for part in parts if part)
+                if tex:
+                    cells.append(tex)
+            if not cells:
+                continue
+            converted_rows += 1
+            tex = cells[0] if len(cells) == 1 else "\\begin{aligned}" + " & ".join(cells) + "\\end{aligned}"
+            row_group = row.find_parent("tbody")
+            row_id = row.get("id") or (row_group.get("id") if row_group else None)
+            suffix = number.get_text(" ", strip=True) if number else ""
+            equation_number = suffix.removeprefix("(").removesuffix(")").strip()
+            if equation_number:
+                tex += f"\\tag{{{equation_number}}}"
+            anchor = f'<a id="{row_id}"></a>\n' if row_id else ""
+            rendered.append(f"{anchor}$$\n{tex}\n$$")
+        if not converted_rows:
+            continue
+        holder = root.new_tag("div")
+        holder["class"] = ["arxiv2md_equations"]
+        holder.string = "\n\n".join(rendered)
+        table.replace_with(holder)
+
+
+def _extract_math_tex(math: Tag) -> str:
+    annotation = math.find("annotation", attrs={"encoding": "application/x-tex"})
+    value = annotation.get_text(strip=True) if annotation else str(math.get("alttext", "")).strip()
+    return _strip_math_delimiters(value)
+
+
+def _strip_math_delimiters(tex: str) -> str:
+    """Remove outer TeX delimiters so display output has exactly one pair."""
+    value = tex.strip()
+    if value.startswith("\\[") and value.endswith("\\]"):
+        return value[2:-2].strip()
+    if value.startswith("$$") and value.endswith("$$"):
+        return value[2:-2].strip()
+    if value.startswith("$") and value.endswith("$"):
+        return value[1:-1].strip()
+    return value
+
+
 def _serialize_figure(figure: Tag, *, remove_inline_citations: bool = False) -> str:
     # Check if this is a table figure (ltx_table class)
     figure_classes = " ".join(figure.get("class", []))
@@ -383,17 +446,16 @@ def _serialize_figure(figure: Tag, *, remove_inline_citations: bool = False) -> 
             lines.append(f"Table: {caption}")
     else:
         # Handle regular image figures
-        img = figure.find("img")
-        src = img.get("src") if img else None
-        alt = img.get("alt") if img else None
-
+        for img in figure.find_all("img"):
+            src = img.get("src")
+            if src:
+                lines.append(f"![{img.get('alt') or caption or 'Figure'}]({src})")
         if caption:
-            lines.append(f"Figure: {caption}")
-        if src:
-            image_label = alt or "Image"
-            lines.append(f"{image_label}: {src}")
+            lines.append(f"*{caption}*")
 
-    return "\n".join(lines).strip()
+    body = "\n\n".join(lines).strip()
+    figure_id = figure.get("id")
+    return (f'<a id="{figure_id}"></a>\n\n' + body) if figure_id and body else body
 
 
 def _normalize_text(text: str) -> str:
