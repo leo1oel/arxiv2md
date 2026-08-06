@@ -16,6 +16,27 @@ TRUSTED_HOSTS = {"arxiv.org", "www.arxiv.org", "ar5iv.labs.arxiv.org"}
 MIME_EXTENSIONS = {"image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif", "image/webp": ".webp"}
 
 
+def sniff_image_type(data: bytes) -> str | None:
+    """The media type a payload actually is, or None if it is not an image.
+
+    The bytes decide, not the Content-Type header. arXiv derives that header
+    from the file name, so a figure an author saved as PNG and named .jpg
+    arrives announced as image/jpeg — trusting the announcement rejected a
+    perfectly good image and failed the whole paper. Sniffing is also the
+    stricter half of the check: it is what proves the payload is an image at
+    all, whatever the server claims.
+    """
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if len(data) >= 12 and data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
 def document_base_url(response_url: str, base_href: str | None) -> str:
     """The URL relative references in a document resolve against.
 
@@ -35,7 +56,11 @@ def resolve_asset_url(source_url: str, src: str) -> str:
 
 @dataclass(frozen=True)
 class AssetLimits:
-    max_count: int = 100
+    # The byte budgets below are the real resource guard; this count only stops
+    # a pathological page from opening thousands of connections. A survey paper
+    # rendered by ar5iv legitimately carries a couple of hundred figures — 100
+    # rejected Flamingo (235) outright rather than dropping a single image.
+    max_count: int = 500
     max_file_bytes: int = 20 * 1024 * 1024
     max_total_bytes: int = 100 * 1024 * 1024
     timeout_seconds: float = 15.0
@@ -67,17 +92,17 @@ class AssetMaterializer:
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=False, transport=self.transport) as client:
             for index, source in enumerate(unique, 1):
                 response, final_url = await self._get_following_safe_redirects(client, source)
-                content_type = response.headers.get("content-type", "").split(";", 1)[0].lower()
-                extension = MIME_EXTENSIONS.get(content_type)
-                if extension is None:
-                    raise ValueError(f"Unsupported asset content type: {content_type or 'missing'}")
                 data = response.content
                 if len(data) > self.limits.max_file_bytes:
                     raise ValueError(f"Asset exceeds per-file limit: {source}")
                 total += len(data)
                 if total > self.limits.max_total_bytes:
                     raise ValueError("Assets exceed total download limit")
-                _validate_signature(content_type, data)
+                content_type = sniff_image_type(data)
+                if content_type is None:
+                    declared = response.headers.get("content-type", "").split(";", 1)[0].lower()
+                    raise ValueError(f"Asset signature does not match a supported image (declared {declared or 'nothing'}): {source}")
+                extension = MIME_EXTENSIONS[content_type]
                 digest = hashlib.sha256(data).hexdigest()
                 name = f"figure-{index:03d}-{digest[:12]}{extension}"
                 destination = (root / name).resolve()
@@ -112,12 +137,3 @@ def _validate_url(url: str) -> None:
         raise ValueError(f"Untrusted asset URL: {url}")
 
 
-def _validate_signature(content_type: str, data: bytes) -> None:
-    valid = {
-        "image/png": data.startswith(b"\x89PNG\r\n\x1a\n"),
-        "image/jpeg": data.startswith(b"\xff\xd8\xff"),
-        "image/gif": data.startswith((b"GIF87a", b"GIF89a")),
-        "image/webp": len(data) >= 12 and data.startswith(b"RIFF") and data[8:12] == b"WEBP",
-    }[content_type]
-    if not valid:
-        raise ValueError(f"Asset signature does not match {content_type}")

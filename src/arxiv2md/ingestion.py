@@ -95,6 +95,12 @@ def _populate_section_markdown(section, *, remove_inline_citations: bool = False
 def _collect_asset_urls(section, base_url: str, urls: list[str]) -> None:
     if section.html:
         soup = BeautifulSoup(section.html, "html.parser")
-        urls.extend(resolve_asset_url(base_url, str(image["src"])) for image in soup.find_all("img", src=True))
+        for image in soup.find_all("img", src=True):
+            resolved = resolve_asset_url(base_url, str(image["src"]))
+            # An inline `data:` image is already in the document; there is
+            # nothing to download, and handing one to the materializer failed
+            # the whole paper on its untrusted-URL check.
+            if resolved.startswith(("http://", "https://")):
+                urls.append(resolved)
     for child in section.children:
         _collect_asset_urls(child, base_url, urls)
