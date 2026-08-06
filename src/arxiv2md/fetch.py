@@ -20,6 +20,25 @@ from arxiv2md.config import (
 
 _RETRY_STATUS = {429, 500, 502, 503, 504}
 
+_NO_HTML_MESSAGE = (
+    "This paper does not have an HTML version available on arXiv. "
+    "arxiv2md requires papers to be available in HTML format. "
+    "Older papers may only be available as PDF."
+)
+
+
+def _is_paper_rendering(html_text: str) -> bool:
+    """Whether the fetched page is an actual LaTeXML paper rendering.
+
+    A 200 is not enough to know we got a paper. ar5iv answers 200 for every
+    id: one it cannot render redirects to the arXiv abstract page, which then
+    parses "successfully" into a stub of the listing header — title, subject,
+    a dozen fake sections — that downstream code cannot tell from a tiny real
+    paper. Every real rendering (arxiv.org and ar5iv are both LaTeXML) marks
+    its body with ltx_document; a page without it is not the paper.
+    """
+    return "ltx_document" in html_text
+
 
 async def fetch_arxiv_html(
     html_url: str,
@@ -44,27 +63,35 @@ async def fetch_arxiv_html(
     source_url_path = cache_dir / "source_url.txt"
 
     if use_cache and _is_cache_fresh(html_path):
-        cached_source_url = source_url_path.read_text(encoding="utf-8").strip() if source_url_path.exists() else html_url
-        return html_path.read_text(encoding="utf-8"), cached_source_url
+        cached = html_path.read_text(encoding="utf-8")
+        # A cached non-rendering (e.g. an abstract page a redirect handed us
+        # before validation existed) must not satisfy the request for a day.
+        if _is_paper_rendering(cached):
+            cached_source_url = source_url_path.read_text(encoding="utf-8").strip() if source_url_path.exists() else html_url
+            return cached, cached_source_url
 
-    # Try primary URL (arxiv.org) first
-    try:
-        html_text, resolved_url = await _fetch_with_retries(html_url)
+    def _store(html_text: str, resolved_url: str) -> None:
         evict_if_needed()
         cache_dir.mkdir(parents=True, exist_ok=True)
         html_path.write_text(html_text, encoding="utf-8")
         source_url_path.write_text(resolved_url, encoding="utf-8")
+
+    # Try primary URL (arxiv.org) first
+    try:
+        html_text, resolved_url = await _fetch_with_retries(html_url)
+        if not _is_paper_rendering(html_text):
+            raise RuntimeError(_NO_HTML_MESSAGE)
+        _store(html_text, resolved_url)
         return html_text, resolved_url
     except RuntimeError as primary_error:
-        # If we got 404 and have ar5iv fallback, try it
+        # If we got 404 (or a page that is not a rendering) and have ar5iv
+        # fallback, try it
         if ar5iv_url and "does not have an HTML version" in str(primary_error):
             try:
                 html_text, resolved_url = await _fetch_with_retries(ar5iv_url)
-                evict_if_needed()
-                cache_dir.mkdir(parents=True, exist_ok=True)
-                html_path.write_text(html_text, encoding="utf-8")
-                source_url_path.write_text(resolved_url, encoding="utf-8")
-                return html_text, resolved_url
+                if _is_paper_rendering(html_text):
+                    _store(html_text, resolved_url)
+                    return html_text, resolved_url
             except Exception:
                 # If ar5iv also fails, raise the original error
                 pass
@@ -84,11 +111,7 @@ async def _fetch_with_retries(url: str) -> tuple[str, str]:
 
             # Check for 404 specifically to provide a better error message
             if response.status_code == 404:
-                raise RuntimeError(
-                    "This paper does not have an HTML version available on arXiv. "
-                    "arxiv2md requires papers to be available in HTML format. "
-                    "Older papers may only be available as PDF."
-                )
+                raise RuntimeError(_NO_HTML_MESSAGE)
 
             if response.status_code in _RETRY_STATUS:
                 last_exc = RuntimeError(f"HTTP {response.status_code} from arXiv")
