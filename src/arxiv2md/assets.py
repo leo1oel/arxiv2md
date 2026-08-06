@@ -37,6 +37,53 @@ def sniff_image_type(data: bytes) -> str | None:
     return None
 
 
+# A figure with few distinct colours is a plot, a diagram or a table shot:
+# sharp text and thin strokes, which lossy coding smears and which lossless
+# WebP happens to compress enormously. Everything above the threshold is
+# photographic — screenshots, qualitative examples — where the opposite holds.
+LINE_ART_MAX_COLORS = 1000
+PHOTO_QUALITY = 90
+# libwebp refuses anything larger; such a figure keeps its original encoding.
+WEBP_MAX_DIMENSION = 16383
+
+
+def recompress_to_webp(data: bytes) -> tuple[bytes, str] | None:
+    """Re-encode a raster image as WebP, or None to keep the original bytes.
+
+    Papers ship figures as arXiv's LaTeX pipeline produced them, which is
+    routinely 16-bit-per-channel RGBA PNG — a depth no display, PDF or paper
+    workflow can show, at twice the bytes. Re-encoding is worth a lot: line art
+    goes lossless and still collapses, photographs take q90 and lose nothing a
+    reader can see.
+    """
+    import io
+
+    from PIL import Image
+
+    try:
+        with Image.open(io.BytesIO(data)) as image:
+            # An animated source has frames WebP would silently flatten away.
+            if getattr(image, "n_frames", 1) > 1:
+                return None
+            if max(image.size) > WEBP_MAX_DIMENSION:
+                return None
+            image = image.convert("RGBA" if "A" in image.getbands() else "RGB")
+            # getcolors returns None once the image passes the cap, which is
+            # exactly the line-art/photograph split we want.
+            lossless = image.getcolors(maxcolors=LINE_ART_MAX_COLORS) is not None
+            buffer = io.BytesIO()
+            if lossless:
+                image.save(buffer, format="WEBP", lossless=True, method=6)
+            else:
+                image.save(buffer, format="WEBP", quality=PHOTO_QUALITY, method=6)
+    except Exception:
+        # A figure we cannot decode is still a figure; ship it untouched.
+        return None
+    encoded = buffer.getvalue()
+    # Re-encoding is an optimization, never an obligation.
+    return (encoded, "image/webp") if encoded and len(encoded) < len(data) else None
+
+
 def document_base_url(response_url: str, base_href: str | None) -> str:
     """The URL relative references in a document resolve against.
 
@@ -70,11 +117,19 @@ class AssetLimits:
 class AssetMaterializer:
     """Download validated raster images and map source URLs to local paths."""
 
-    def __init__(self, output_file: Path, *, limits: AssetLimits = AssetLimits(), transport: httpx.AsyncBaseTransport | None = None) -> None:
+    def __init__(self, output_file: Path, *, limits: AssetLimits = AssetLimits(), transport: httpx.AsyncBaseTransport | None = None, compress: bool = False) -> None:
         self.output_file = output_file.resolve()
         self.assets_dir = self.output_file.parent / f"{self.output_file.stem}_assets"
         self.limits = limits
         self.transport = transport
+        if compress:
+            # Fail here rather than quietly shipping uncompressed figures: the
+            # caller asked for this and has no other way to find out.
+            try:
+                import PIL.Image  # noqa: F401
+            except ImportError as exc:  # pragma: no cover - packaging guard
+                raise ValueError("Compressing assets requires Pillow") from exc
+        self.compress = compress
         self._references: dict[str, str] = {}
 
     def __call__(self, source_url: str) -> str:
@@ -102,6 +157,13 @@ class AssetMaterializer:
                 if content_type is None:
                     declared = response.headers.get("content-type", "").split(";", 1)[0].lower()
                     raise ValueError(f"Asset signature does not match a supported image (declared {declared or 'nothing'}): {source}")
+                # After the signature check, so only bytes already proven to be
+                # an image are ever handed to the decoder. The manifest then
+                # describes what is on disk, not what arrived.
+                if self.compress:
+                    recompressed = recompress_to_webp(data)
+                    if recompressed is not None:
+                        data, content_type = recompressed
                 extension = MIME_EXTENSIONS[content_type]
                 digest = hashlib.sha256(data).hexdigest()
                 name = f"figure-{index:03d}-{digest[:12]}{extension}"

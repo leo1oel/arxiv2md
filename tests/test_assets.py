@@ -8,7 +8,7 @@ import json
 import httpx
 import pytest
 
-from arxiv2md.assets import AssetLimits, AssetMaterializer, document_base_url, resolve_asset_url, sniff_image_type
+from arxiv2md.assets import AssetLimits, AssetMaterializer, document_base_url, recompress_to_webp, resolve_asset_url, sniff_image_type
 
 PNG = b"\x89PNG\r\n\x1a\ncontent"
 
@@ -94,3 +94,90 @@ def test_sniff_image_type_recognizes_each_supported_format() -> None:
     assert sniff_image_type(b"GIF89a rest") == "image/gif"
     assert sniff_image_type(b"RIFF\x00\x00\x00\x00WEBPrest") == "image/webp"
     assert sniff_image_type(b"<html>not an image</html>") is None
+
+
+def _png(size: tuple[int, int], colors: int) -> bytes:
+    from PIL import Image
+    import io
+    image = Image.new("RGB", size)
+    pixels = image.load()
+    for y in range(size[1]):
+        for x in range(size[0]):
+            # `colors` distinct values, tiled — few for line art, many for photos.
+            value = (x * size[1] + y) % colors
+            pixels[x, y] = (value % 256, (value // 256) % 256, (value // 65536) % 256)
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def test_recompress_uses_lossless_for_line_art() -> None:
+    from PIL import Image
+    import io
+    source = _png((64, 64), 8)
+    result = recompress_to_webp(source)
+    assert result is not None
+    data, media_type = result
+    assert media_type == "image/webp"
+    # Lossless: every pixel survives the round trip.
+    with Image.open(io.BytesIO(data)) as out, Image.open(io.BytesIO(source)) as original:
+        assert list(out.convert("RGB").getdata()) == list(original.convert("RGB").getdata())
+
+
+def _photo_png(size: tuple[int, int]) -> bytes:
+    """Textured content PNG cannot compress away, the way a real screenshot is."""
+    from PIL import Image
+    import io
+    import random
+    rng = random.Random(11)
+    image = Image.new("RGB", size)
+    image.putdata([(rng.randrange(256), rng.randrange(256), rng.randrange(256)) for _ in range(size[0] * size[1])])
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def test_recompress_uses_lossy_for_photographs() -> None:
+    source = _photo_png((128, 128))
+    result = recompress_to_webp(source)
+    assert result is not None
+    data, media_type = result
+    assert media_type == "image/webp"
+    assert len(data) < len(source)
+
+
+def test_recompress_declines_when_it_would_grow_the_file() -> None:
+    # A smooth ramp is already ideal for PNG; re-encoding must not make it worse.
+    assert recompress_to_webp(_png((256, 256), 40000)) is None
+
+
+def test_recompress_keeps_the_original_when_it_cannot_help() -> None:
+    assert recompress_to_webp(b"not an image at all") is None
+
+
+@pytest.mark.asyncio
+async def test_materializer_stores_compressed_bytes_and_describes_them(tmp_path) -> None:
+    source_png = _png((64, 64), 8)
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, headers={"content-type": "image/png"}, content=source_png))
+    materializer = AssetMaterializer(tmp_path / "paper.md", transport=transport, compress=True)
+    source = "https://arxiv.org/html/2106.09685v2/x1.png"
+    await materializer.materialize([source])
+
+    reference = materializer(source)
+    assert reference.endswith(".webp")
+    stored = (tmp_path / reference).read_bytes()
+    entry = json.loads((tmp_path / "paper_assets/manifest.json").read_text())["assets"][0]
+    # The manifest has to describe the file on disk, which the app verifies.
+    assert entry["type"] == "image/webp"
+    assert entry["size"] == len(stored)
+    assert entry["sha256"] == hashlib.sha256(stored).hexdigest()
+
+
+@pytest.mark.asyncio
+async def test_materializer_leaves_assets_alone_without_the_flag(tmp_path) -> None:
+    source_png = _png((64, 64), 8)
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, headers={"content-type": "image/png"}, content=source_png))
+    materializer = AssetMaterializer(tmp_path / "paper.md", transport=transport)
+    source = "https://arxiv.org/html/2106.09685v2/x1.png"
+    await materializer.materialize([source])
+    assert materializer(source).endswith(".png")

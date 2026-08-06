@@ -37,7 +37,7 @@ async def _async_main(args: argparse.Namespace) -> None:
     output_target = args.output if args.output is not None else DEFAULT_OUTPUT_FILE
     if args.download_assets and output_target == "-":
         raise ValueError("--download-assets requires a file output; stdout is not supported")
-    materializer = AssetMaterializer(Path(output_target)) if args.download_assets else None
+    materializer = AssetMaterializer(Path(output_target), compress=args.compress_assets) if args.download_assets else None
 
     sections = _collect_sections(args.sections, args.section)
     result, _metadata = await ingest_paper(
@@ -161,6 +161,11 @@ def _parse_args() -> argparse.Namespace:
         "--download-assets",
         action="store_true",
         help="Download figure images beside the output and emit local Markdown references.",
+    )
+    parser.add_argument(
+        "--compress-assets",
+        action="store_true",
+        help="Re-encode downloaded figures as WebP: lossless for line art, quality 90 for photographs.",
     )
     return parser.parse_args()
 
