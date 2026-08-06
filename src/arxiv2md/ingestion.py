@@ -6,7 +6,7 @@ from collections.abc import Callable
 
 from bs4 import BeautifulSoup
 
-from arxiv2md.assets import AssetMaterializer, resolve_asset_url
+from arxiv2md.assets import AssetMaterializer, document_base_url, resolve_asset_url
 from arxiv2md.fetch import fetch_arxiv_html
 from arxiv2md.html_parser import parse_arxiv_html
 from arxiv2md.markdown import convert_fragment_to_markdown
@@ -40,8 +40,9 @@ async def ingest_paper(
         If True, completely remove inline citation links from the output.
         If False (default), citation URLs are stripped but text is kept.
     """
-    html, source_url = await fetch_arxiv_html(html_url, arxiv_id=arxiv_id, version=version, use_cache=True, ar5iv_url=ar5iv_url)
+    html, response_url = await fetch_arxiv_html(html_url, arxiv_id=arxiv_id, version=version, use_cache=True, ar5iv_url=ar5iv_url)
     parsed = parse_arxiv_html(html)
+    source_url = document_base_url(response_url, parsed.base_href)
 
     filtered_sections = filter_sections(parsed.sections, mode=section_filter_mode, selected=sections)
     if remove_refs:

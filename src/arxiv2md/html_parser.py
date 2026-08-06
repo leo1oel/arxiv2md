@@ -31,6 +31,7 @@ class ParsedArxivHtml:
     authors: list[str]
     abstract: str | None
     sections: list[SectionNode]
+    base_href: str | None = None
 
 
 def parse_arxiv_html(html: str) -> ParsedArxivHtml:
@@ -42,8 +43,24 @@ def parse_arxiv_html(html: str) -> ParsedArxivHtml:
     authors = _extract_authors(soup)
     abstract = _extract_abstract(soup)
     sections = _extract_sections(document_root)
+    base_href = _extract_base_href(soup)
 
-    return ParsedArxivHtml(title=title, authors=authors, abstract=abstract, sections=sections)
+    return ParsedArxivHtml(title=title, authors=authors, abstract=abstract, sections=sections, base_href=base_href)
+
+
+def _extract_base_href(soup: BeautifulSoup) -> str | None:
+    """Read the document's declared base URL, if it has one.
+
+    arXiv serves every paper with ``<base href="/html/<id>v<n>/">``. That tag is
+    how a browser knows a relative ``src="x1.png"`` belongs to the paper's own
+    directory, and honouring it is the only way to get the version right: the
+    request URL may carry no version at all.
+    """
+    base = soup.find("base", href=True)
+    if not base:
+        return None
+    href = str(base["href"]).strip()
+    return href or None
 
 
 def _find_document_root(soup: BeautifulSoup) -> Tag:

@@ -35,3 +35,13 @@ def test_extracts_metadata_and_sections() -> None:
     assert parsed.sections
     assert parsed.sections[0].title == "1 Intro"
     assert parsed.sections[0].html and "Intro text." in parsed.sections[0].html
+
+
+def test_parse_arxiv_html_reads_the_declared_base_href() -> None:
+    html = '<html><head><base href="/html/2106.09685v2/"/></head><body><article class="ltx_document"></article></body></html>'
+    assert parse_arxiv_html(html).base_href == "/html/2106.09685v2/"
+
+
+def test_parse_arxiv_html_reports_no_base_href_when_absent() -> None:
+    html = '<html><head></head><body><article class="ltx_document"></article></body></html>'
+    assert parse_arxiv_html(html).base_href is None

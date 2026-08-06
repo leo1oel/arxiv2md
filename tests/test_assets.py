@@ -8,7 +8,7 @@ import json
 import httpx
 import pytest
 
-from arxiv2md.assets import AssetLimits, AssetMaterializer
+from arxiv2md.assets import AssetLimits, AssetMaterializer, document_base_url, resolve_asset_url
 
 PNG = b"\x89PNG\r\n\x1a\ncontent"
 
@@ -52,3 +52,23 @@ async def test_materializer_enforces_signature_and_limits(tmp_path) -> None:
         await materializer.materialize(["https://arxiv.org/image.png"])
     with pytest.raises(ValueError, match="count"):
         await materializer.materialize(["https://arxiv.org/a.png", "https://arxiv.org/b.png"])
+
+
+def test_document_base_url_honours_a_declared_base() -> None:
+    # arXiv answers /html/<id> directly and declares the versioned directory,
+    # so a relative figure has to land under it.
+    base = document_base_url("https://arxiv.org/html/2106.09685", "/html/2106.09685v2/")
+    assert base == "https://arxiv.org/html/2106.09685v2/"
+    assert resolve_asset_url(base, "x1.png") == "https://arxiv.org/html/2106.09685v2/x1.png"
+
+
+def test_document_base_url_falls_back_to_the_response_url() -> None:
+    base = document_base_url("https://ar5iv.labs.arxiv.org/html/2106.09685", None)
+    assert base == "https://ar5iv.labs.arxiv.org/html/2106.09685"
+    # ar5iv uses root-relative sources, which resolve without a <base>.
+    assert resolve_asset_url(base, "/html/2106.09685/assets/x1.png") == "https://ar5iv.labs.arxiv.org/html/2106.09685/assets/x1.png"
+
+
+def test_document_base_url_accepts_an_absolute_base() -> None:
+    base = document_base_url("https://arxiv.org/html/2106.09685", "https://cdn.example.com/paper/")
+    assert base == "https://cdn.example.com/paper/"

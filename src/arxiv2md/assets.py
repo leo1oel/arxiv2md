@@ -16,8 +16,20 @@ TRUSTED_HOSTS = {"arxiv.org", "www.arxiv.org", "ar5iv.labs.arxiv.org"}
 MIME_EXTENSIONS = {"image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif", "image/webp": ".webp"}
 
 
+def document_base_url(response_url: str, base_href: str | None) -> str:
+    """The URL relative references in a document resolve against.
+
+    A document's own ``<base href>`` wins over the URL it was fetched from,
+    exactly as it does in a browser. arXiv relies on this: it answers
+    ``/html/<id>`` directly and declares ``<base href="/html/<id>v<n>/">``, so
+    resolving against the request URL instead drops both the version and the
+    directory and sends every relative figure to ``/html/<file>``.
+    """
+    return urljoin(response_url, base_href) if base_href else response_url
+
+
 def resolve_asset_url(source_url: str, src: str) -> str:
-    """Resolve an image URL against the actual HTML response URL."""
+    """Resolve an image URL against the document's base URL."""
     return urljoin(source_url, src)
 
 
