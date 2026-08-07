@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from dataclasses import dataclass
@@ -112,6 +113,11 @@ class AssetLimits:
     max_total_bytes: int = 100 * 1024 * 1024
     timeout_seconds: float = 15.0
     max_redirects: int = 5
+    # Figures download concurrently up to this many at once. Serial downloads
+    # made the asset stage scale with figure count times arXiv's latency — a
+    # 44-figure paper spent most of its conversion just waiting on round
+    # trips. Modest on purpose: this parallelism hits arXiv itself.
+    max_concurrency: int = 8
 
 
 class AssetMaterializer:
@@ -141,39 +147,64 @@ class AssetMaterializer:
             raise ValueError(f"Asset count exceeds limit ({self.limits.max_count})")
         self.assets_dir.mkdir(parents=True, exist_ok=True)
         root = self.assets_dir.resolve()
-        entries: list[dict[str, object]] = []
         total = 0
+        semaphore = asyncio.Semaphore(self.limits.max_concurrency)
+
+        async def fetch(source: str) -> tuple[bytes, str, str]:
+            nonlocal total
+            # The semaphore covers only the network wait; validation and
+            # re-encoding release the slot so downloads keep flowing while a
+            # figure is being compressed on a worker thread.
+            async with semaphore:
+                response, final_url = await self._get_following_safe_redirects(client, source)
+            data = response.content
+            if len(data) > self.limits.max_file_bytes:
+                raise ValueError(f"Asset exceeds per-file limit: {source}")
+            # The running total is only advisory under concurrency: requests
+            # already in flight may finish after the budget is crossed, so the
+            # overshoot is bounded by max_concurrency times the file limit.
+            total += len(data)
+            if total > self.limits.max_total_bytes:
+                raise ValueError("Assets exceed total download limit")
+            content_type = sniff_image_type(data)
+            if content_type is None:
+                declared = response.headers.get("content-type", "").split(";", 1)[0].lower()
+                raise ValueError(f"Asset signature does not match a supported image (declared {declared or 'nothing'}): {source}")
+            # After the signature check, so only bytes already proven to be
+            # an image are ever handed to the decoder. The manifest then
+            # describes what is on disk, not what arrived. On a thread because
+            # WebP method=6 is deliberately slow — encoded inline it would
+            # stall the event loop and serialize the downloads again.
+            if self.compress:
+                recompressed = await asyncio.to_thread(recompress_to_webp, data)
+                if recompressed is not None:
+                    data, content_type = recompressed
+            return data, content_type, final_url
+
         timeout = httpx.Timeout(self.limits.timeout_seconds)
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=False, transport=self.transport) as client:
-            for index, source in enumerate(unique, 1):
-                response, final_url = await self._get_following_safe_redirects(client, source)
-                data = response.content
-                if len(data) > self.limits.max_file_bytes:
-                    raise ValueError(f"Asset exceeds per-file limit: {source}")
-                total += len(data)
-                if total > self.limits.max_total_bytes:
-                    raise ValueError("Assets exceed total download limit")
-                content_type = sniff_image_type(data)
-                if content_type is None:
-                    declared = response.headers.get("content-type", "").split(";", 1)[0].lower()
-                    raise ValueError(f"Asset signature does not match a supported image (declared {declared or 'nothing'}): {source}")
-                # After the signature check, so only bytes already proven to be
-                # an image are ever handed to the decoder. The manifest then
-                # describes what is on disk, not what arrived.
-                if self.compress:
-                    recompressed = recompress_to_webp(data)
-                    if recompressed is not None:
-                        data, content_type = recompressed
-                extension = MIME_EXTENSIONS[content_type]
-                digest = hashlib.sha256(data).hexdigest()
-                name = f"figure-{index:03d}-{digest[:12]}{extension}"
-                destination = (root / name).resolve()
-                if root not in destination.parents:
-                    raise ValueError("Asset path escapes output directory")
-                destination.write_bytes(data)
-                relative = destination.relative_to(self.output_file.parent).as_posix()
-                self._references[source] = relative
-                entries.append({"source": source, "resolved_source": final_url, "path": relative, "type": content_type, "size": len(data), "sha256": digest})
+            results = await asyncio.gather(*(fetch(source) for source in unique), return_exceptions=True)
+        # Surface the first failure in source order, not completion order, so
+        # a broken paper reports the same error on every run.
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
+        # Everything ordering-sensitive — figure numbering, reference mapping,
+        # the manifest — happens down here in source order, exactly as the
+        # serial loop did it.
+        entries: list[dict[str, object]] = []
+        for index, (source, result) in enumerate(zip(unique, results), 1):
+            data, content_type, final_url = result
+            extension = MIME_EXTENSIONS[content_type]
+            digest = hashlib.sha256(data).hexdigest()
+            name = f"figure-{index:03d}-{digest[:12]}{extension}"
+            destination = (root / name).resolve()
+            if root not in destination.parents:
+                raise ValueError("Asset path escapes output directory")
+            destination.write_bytes(data)
+            relative = destination.relative_to(self.output_file.parent).as_posix()
+            self._references[source] = relative
+            entries.append({"source": source, "resolved_source": final_url, "path": relative, "type": content_type, "size": len(data), "sha256": digest})
         manifest = {"schema_version": MANIFEST_SCHEMA, "converter": CONVERTER, "converter_version": "0.1.0", "assets": entries}
         (root / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
