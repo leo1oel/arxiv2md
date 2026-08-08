@@ -40,18 +40,50 @@ async def test_materializer_downloads_deterministically_and_writes_manifest(tmp_
 async def test_materializer_revalidates_redirect_origin(tmp_path) -> None:
     transport = httpx.MockTransport(lambda request: httpx.Response(302, headers={"location": "https://example.com/image.png"}))
     materializer = AssetMaterializer(tmp_path / "paper.md", transport=transport)
-    with pytest.raises(ValueError, match="Untrusted asset URL"):
-        await materializer.materialize(["https://arxiv.org/image.png"])
+    await materializer.materialize(["https://arxiv.org/image.png"])
+
+    # The figure is refused, and the paper still converts without it.
+    manifest = json.loads((tmp_path / "paper_assets/manifest.json").read_text())
+    assert manifest["assets"] == []
+    assert "Untrusted asset URL" in manifest["skipped"][0]["reason"]
 
 
 @pytest.mark.asyncio
 async def test_materializer_enforces_signature_and_limits(tmp_path) -> None:
     transport = httpx.MockTransport(lambda request: httpx.Response(200, headers={"content-type": "image/png"}, content=b"not png"))
     materializer = AssetMaterializer(tmp_path / "paper.md", limits=AssetLimits(max_count=1), transport=transport)
-    with pytest.raises(ValueError, match="signature"):
-        await materializer.materialize(["https://arxiv.org/image.png"])
+    await materializer.materialize(["https://arxiv.org/image.png"])
+    manifest = json.loads((tmp_path / "paper_assets/manifest.json").read_text())
+    assert manifest["assets"] == []
+    assert "Not a supported image" in manifest["skipped"][0]["reason"]
+    # The whole-run limits still stop the run: they are not about one figure.
     with pytest.raises(ValueError, match="count"):
         await materializer.materialize(["https://arxiv.org/a.png", "https://arxiv.org/b.png"])
+
+
+@pytest.mark.asyncio
+async def test_one_dead_figure_does_not_cost_the_reader_the_paper(tmp_path) -> None:
+    # arXiv answers a request for a missing image with the article page itself:
+    # HTML, HTTP 200. That one `<img>` used to abort the whole conversion.
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("missing.png"):
+            return httpx.Response(200, headers={"content-type": "text/html"}, content=b"<html>paper</html>")
+        return httpx.Response(200, headers={"content-type": "image/png"}, content=PNG)
+
+    output = tmp_path / "paper.md"
+    materializer = AssetMaterializer(output, transport=httpx.MockTransport(handler))
+    good = "https://arxiv.org/good.png"
+    dead = "https://arxiv.org/missing.png"
+    await materializer.materialize([dead, good])
+
+    manifest = json.loads((tmp_path / "paper_assets/manifest.json").read_text())
+    assert [entry["source"] for entry in manifest["assets"]] == [good]
+    assert manifest["skipped"] == [
+        {"source": dead, "reason": "Not a supported image (declared text/html)"},
+    ]
+    # The good figure is local; the dead one keeps pointing at arXiv.
+    assert materializer(good).startswith("paper_assets/")
+    assert materializer(dead) == dead
 
 
 def test_document_base_url_honours_a_declared_base() -> None:

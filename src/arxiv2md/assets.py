@@ -11,10 +11,30 @@ from urllib.parse import urljoin, urlparse
 
 import httpx
 
+from arxiv2md.utils.logging_config import get_logger
+
+logger = get_logger(__name__)
+
 CONVERTER = "arxiv2markdown"
 MANIFEST_SCHEMA = 1
 TRUSTED_HOSTS = {"arxiv.org", "www.arxiv.org", "ar5iv.labs.arxiv.org"}
 MIME_EXTENSIONS = {"image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif", "image/webp": ".webp"}
+
+
+class UnusableAsset(Exception):
+    """One figure could not be fetched, and the paper is fine without it.
+
+    Separated from the errors that invalidate a whole run (the total download
+    budget, a path escaping the output directory) because those two used to be
+    the same thing: any single bad figure aborted the conversion. arXiv answers
+    a request for a missing image with the article page — HTML, HTTP 200 — so
+    one dead `<img>` in a paper cost the reader the entire document.
+    """
+
+    def __init__(self, source: str, reason: str) -> None:
+        super().__init__(f"{reason}: {source}")
+        self.source = source
+        self.reason = reason
 
 
 def sniff_image_type(data: bytes) -> str | None:
@@ -156,10 +176,19 @@ class AssetMaterializer:
             # re-encoding release the slot so downloads keep flowing while a
             # figure is being compressed on a worker thread.
             async with semaphore:
-                response, final_url = await self._get_following_safe_redirects(client, source)
+                try:
+                    response, final_url = await self._get_following_safe_redirects(client, source)
+                except UnusableAsset:
+                    raise
+                except httpx.HTTPError as error:
+                    raise UnusableAsset(source, f"Could not fetch asset ({error})") from error
+                except ValueError as error:
+                    # An untrusted host or a redirect that went nowhere: about
+                    # this one URL, not about the paper.
+                    raise UnusableAsset(source, str(error)) from error
             data = response.content
             if len(data) > self.limits.max_file_bytes:
-                raise ValueError(f"Asset exceeds per-file limit: {source}")
+                raise UnusableAsset(source, "Asset exceeds the per-file limit")
             # The running total is only advisory under concurrency: requests
             # already in flight may finish after the budget is crossed, so the
             # overshoot is bounded by max_concurrency times the file limit.
@@ -169,7 +198,10 @@ class AssetMaterializer:
             content_type = sniff_image_type(data)
             if content_type is None:
                 declared = response.headers.get("content-type", "").split(";", 1)[0].lower()
-                raise ValueError(f"Asset signature does not match a supported image (declared {declared or 'nothing'}): {source}")
+                raise UnusableAsset(
+                    source,
+                    f"Not a supported image (declared {declared or 'nothing'})",
+                )
             # After the signature check, so only bytes already proven to be
             # an image are ever handed to the decoder. The manifest then
             # describes what is on disk, not what arrived. On a thread because
@@ -185,15 +217,24 @@ class AssetMaterializer:
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=False, transport=self.transport) as client:
             results = await asyncio.gather(*(fetch(source) for source in unique), return_exceptions=True)
         # Surface the first failure in source order, not completion order, so
-        # a broken paper reports the same error on every run.
-        for result in results:
-            if isinstance(result, BaseException):
+        # a broken paper reports the same error on every run. Only the failures
+        # that invalidate the whole run stop it; a figure that could not be
+        # fetched is recorded and left out, and its Markdown keeps pointing at
+        # the original URL.
+        skipped: list[dict[str, object]] = []
+        for source, result in zip(unique, results):
+            if isinstance(result, UnusableAsset):
+                logger.warning("Skipping figure %s: %s", result.source, result.reason)
+                skipped.append({"source": source, "reason": result.reason})
+            elif isinstance(result, BaseException):
                 raise result
         # Everything ordering-sensitive — figure numbering, reference mapping,
         # the manifest — happens down here in source order, exactly as the
         # serial loop did it.
         entries: list[dict[str, object]] = []
         for index, (source, result) in enumerate(zip(unique, results), 1):
+            if isinstance(result, UnusableAsset):
+                continue
             data, content_type, final_url = result
             extension = MIME_EXTENSIONS[content_type]
             digest = hashlib.sha256(data).hexdigest()
@@ -205,7 +246,7 @@ class AssetMaterializer:
             relative = destination.relative_to(self.output_file.parent).as_posix()
             self._references[source] = relative
             entries.append({"source": source, "resolved_source": final_url, "path": relative, "type": content_type, "size": len(data), "sha256": digest})
-        manifest = {"schema_version": MANIFEST_SCHEMA, "converter": CONVERTER, "converter_version": "0.1.0", "assets": entries}
+        manifest = {"schema_version": MANIFEST_SCHEMA, "converter": CONVERTER, "converter_version": "0.1.0", "assets": entries, "skipped": skipped}
         (root / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
     async def _get_following_safe_redirects(self, client: httpx.AsyncClient, url: str) -> tuple[httpx.Response, str]:
