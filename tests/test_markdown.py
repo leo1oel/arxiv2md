@@ -160,7 +160,7 @@ def test_wide_table_keeps_every_metric_and_variant_in_its_source_column() -> Non
             <th>wiki_common</th><th>Avg</th>
         </tr>
         <tr><td></td><td>SAM3</td><td>47.3</td><td>53.7</td><td>61.1</td><td>53.4</td><td>65.5</td><td>54.9</td><td>42.5</td><td>54.1</td></tr>
-        <tr><td rowspan="4">C-RADIOv4</td><td>SO400M-VDT8</td><td>43.0</td><td>44.5</td><td>54.9</td><td>38.4</td><td>38.4</td><td>40.3</td><td>22.2</td><td>40.3</td></tr>
+        <tr><td rowspan="4"><span style="transform: rotate(-90deg)">C-RADIOv4</span></td><td>SO400M-VDT8</td><td>43.0</td><td>44.5</td><td>54.9</td><td>38.4</td><td>38.4</td><td>40.3</td><td>22.2</td><td>40.3</td></tr>
         <tr><td>SO400M-G</td><td>43.8</td><td>45.7</td><td>55.9</td><td>40.1</td><td>39.8</td><td>41.6</td><td>23.1</td><td>41.4</td></tr>
         <tr><td>H-VDT8</td><td>45.2</td><td>48.1</td><td>56.6</td><td>40.3</td><td>45.3</td><td>44.0</td><td>26.2</td><td>43.7</td></tr>
         <tr><td>H-VDT12</td><td>45.6</td><td>48.4</td><td>57.3</td><td>40.2</td><td>46.1</td><td>45.2</td><td>26.7</td><td>44.2</td></tr>
@@ -176,7 +176,7 @@ def test_wide_table_keeps_every_metric_and_variant_in_its_source_column() -> Non
     assert lines[4] == "| C-RADIOv4 | SO400M-VDT8 | 43.0 | 44.5 | 54.9 | 38.4 | 38.4 | 40.3 | 22.2 | 40.3 |"
     assert lines[5] == "| C-RADIOv4 | SO400M-G | 43.8 | 45.7 | 55.9 | 40.1 | 39.8 | 41.6 | 23.1 | 41.4 |"
     assert lines[7] == "| C-RADIOv4 | H-VDT12 | 45.6 | 48.4 | 57.3 | 40.2 | 46.1 | 45.2 | 26.7 | 44.2 |"
-    assert lines[8] == "|  | H-G | 45.9 | 48.8 | 57.4 | 40.9 | 46.5 | 45.9 | 27.3 | 44.7 |"
+    assert lines[8] == "| C-RADIOv4 | H-G | 45.9 | 48.8 | 57.4 | 40.9 | 46.5 | 45.9 | 27.3 | 44.7 |"
 
 
 def test_table_handles_multiple_active_spans_and_real_empty_cells() -> None:

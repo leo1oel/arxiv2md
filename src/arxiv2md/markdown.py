@@ -125,6 +125,7 @@ def convert_all_mathml_to_latex(root: BeautifulSoup) -> None:
 def fix_tabular_tables(root: BeautifulSoup) -> None:
     tables = root.find_all("table", class_=re.compile(r"ltx_tabular"))
     for table in tables:
+        _repair_rotated_row_group_spans(table)
         _remove_all_attributes(table)
         for child in table.find_all(["tbody", "thead", "tfoot", "tr", "td", "th"]):
             spans = {}
@@ -134,6 +135,54 @@ def fix_tabular_tables(root: BeautifulSoup) -> None:
                     if span != 1:
                         spans[attribute] = str(span)
             child.attrs = spans
+
+
+def _repair_rotated_row_group_spans(table: Tag) -> None:
+    """Extend an under-counted vertical row label over trailing data rows.
+
+    LaTeX tables commonly rotate a ``multirow`` label in their first column.
+    Some papers under-count that multirow while still leaving an empty first
+    cell on the remaining data rows. Browsers make the visual grouping fairly
+    clear, but the literal HTML rowspan ends early. Treat those empty cells as
+    continuation placeholders unless a top border starts a new row group.
+    """
+    for cell in table.find_all(["td", "th"], rowspan=True):
+        rowspan = _table_span(cell, "rowspan")
+        if rowspan <= 1 or not cell.find(
+            style=re.compile(r"rotate\(\s*-?90deg\s*\)", re.IGNORECASE)
+        ):
+            continue
+        row = cell.find_parent("tr")
+        row_group = row.parent if row else None
+        if not row or not isinstance(row_group, Tag):
+            continue
+        rows = row_group.find_all("tr", recursive=False)
+        try:
+            row_index = rows.index(row)
+        except ValueError:
+            continue
+        row_cells = row.find_all(["td", "th"], recursive=False)
+        if not row_cells or row_cells[0] is not cell:
+            continue
+
+        placeholders: list[Tag] = []
+        for continuation in rows[row_index + rowspan :]:
+            continuation_cells = continuation.find_all(["td", "th"], recursive=False)
+            if not continuation_cells:
+                break
+            placeholder = continuation_cells[0]
+            classes = set(placeholder.get("class", []))
+            if "ltx_border_t" in classes or placeholder.get_text(" ", strip=True):
+                break
+            if not any(candidate.get_text(" ", strip=True) for candidate in continuation_cells[1:]):
+                break
+            placeholders.append(placeholder)
+
+        if not placeholders:
+            continue
+        cell["rowspan"] = str(rowspan + len(placeholders))
+        for placeholder in placeholders:
+            placeholder.decompose()
 
 
 def _resolve_image_urls(root: BeautifulSoup, base_url: str) -> None:
