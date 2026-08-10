@@ -14,6 +14,8 @@ except ImportError as exc:  # pragma: no cover - runtime dependency check
 
 
 _EQUATION_TABLE_RE = re.compile(r"ltx_equationgroup|ltx_eqn_align|ltx_eqn_table")
+_MAX_TABLE_COLSPAN = 1_000
+_MAX_TABLE_ROWSPAN = 65_534
 
 
 def convert_html_to_markdown(html: str, *, remove_refs: bool = False, remove_toc: bool = False) -> str:
@@ -125,7 +127,13 @@ def fix_tabular_tables(root: BeautifulSoup) -> None:
     for table in tables:
         _remove_all_attributes(table)
         for child in table.find_all(["tbody", "thead", "tfoot", "tr", "td", "th"]):
-            _remove_all_attributes(child)
+            spans = {}
+            if child.name in {"td", "th"}:
+                for attribute in ("rowspan", "colspan"):
+                    span = _table_span(child, attribute)
+                    if span != 1:
+                        spans[attribute] = str(span)
+            child.attrs = spans
 
 
 def _resolve_image_urls(root: BeautifulSoup, base_url: str) -> None:
@@ -138,6 +146,25 @@ def _resolve_image_urls(root: BeautifulSoup, base_url: str) -> None:
 
 def _remove_all_attributes(tag: Tag) -> None:
     tag.attrs = {}
+
+
+def _table_span(cell: Tag, attribute: str) -> int:
+    try:
+        span = int(str(cell.get(attribute, 1)))
+    except (TypeError, ValueError):
+        return 1
+    if attribute == "rowspan" and span == 0:
+        return 0
+    maximum = _MAX_TABLE_ROWSPAN if attribute == "rowspan" else _MAX_TABLE_COLSPAN
+    return min(max(1, span), maximum)
+
+
+def _escape_table_pipes(text: str) -> str:
+    return re.sub(
+        r"(\\*)\|",
+        lambda match: match.group(1) + (r"\|" if len(match.group(1)) % 2 == 0 else "|"),
+        text,
+    )
 
 
 def _serialize_children(container: Tag, *, remove_inline_citations: bool = False) -> list[str]:
@@ -322,34 +349,79 @@ def _serialize_table(table: Tag, *, remove_inline_citations: bool = False) -> st
             return ""
         return f"$$ {eqn_text} $$"
 
-    rows = []
-    # Find rows in tbody, thead, tfoot, or directly in table
-    # Handle nested structure where rows might be inside tbody/thead/tfoot
-    tbody_elements = table.find_all(["tbody", "thead", "tfoot"], recursive=False)
-    
-    if tbody_elements:
-        # Table has tbody/thead/tfoot structure - find rows within them
-        for tbody in tbody_elements:
-            for row in tbody.find_all("tr", recursive=False):
-                cells = row.find_all(["th", "td"], recursive=False)
-                if not cells:
-                    continue
-                values = []
-                for cell in cells:
-                    cell_text = _cleanup_inline_text(_serialize_inline(cell, remove_inline_citations=remove_inline_citations)).replace("\n", "<br>")
-                    values.append(cell_text)
-                rows.append(values)
-    else:
-        # Table has no tbody/thead/tfoot - find rows directly in table
-        for row in table.find_all("tr", recursive=False):
+    row_groups: list[list[Tag]] = []
+    loose_rows: list[Tag] = []
+    for child in table.children:
+        if not isinstance(child, Tag):
+            continue
+        if child.name == "tr":
+            loose_rows.append(child)
+            continue
+        if child.name not in {"tbody", "thead", "tfoot"}:
+            continue
+        if loose_rows:
+            row_groups.append(loose_rows)
+            loose_rows = []
+        section_rows = child.find_all("tr", recursive=False)
+        if section_rows:
+            row_groups.append(section_rows)
+    if loose_rows:
+        row_groups.append(loose_rows)
+
+    rows: list[list[str]] = []
+    # GFM has no merged-cell syntax. Expand each merged cell over every logical
+    # slot it covers and repeat its text there. Repetition makes row and column
+    # meaning explicit to both Markdown renderers and text-only consumers.
+    active_rowspans: dict[int, tuple[str, int]] = {}
+    for row_group in row_groups:
+        active_rowspans = {}
+        for row_index, row in enumerate(row_group):
             cells = row.find_all(["th", "td"], recursive=False)
-            if not cells:
-                continue
-            values = []
+            values = {
+                column: text
+                for column, (text, _remaining_rows) in active_rowspans.items()
+            }
+            column = 0
+            new_rowspans: dict[int, tuple[str, int]] = {}
             for cell in cells:
-                cell_text = _cleanup_inline_text(_serialize_inline(cell, remove_inline_citations=remove_inline_citations)).replace("\n", "<br>")
-                values.append(cell_text)
-            rows.append(values)
+                colspan = _table_span(cell, "colspan")
+                while column in values:
+                    column += 1
+                cell_text = _cleanup_inline_text(
+                    _serialize_inline(
+                        cell,
+                        remove_inline_citations=remove_inline_citations,
+                    )
+                ).replace("\n", "<br>")
+                cell_text = _escape_table_pipes(cell_text)
+                owned_columns = [
+                    occupied_column
+                    for occupied_column in range(column, column + colspan)
+                    if occupied_column not in values
+                ]
+                for occupied_column in owned_columns:
+                    values[occupied_column] = cell_text
+
+                rowspan = _table_span(cell, "rowspan")
+                remaining_rows = (
+                    len(row_group) - row_index - 1
+                    if rowspan == 0
+                    else rowspan - 1
+                )
+                if remaining_rows:
+                    for occupied_column in owned_columns:
+                        new_rowspans[occupied_column] = (cell_text, remaining_rows)
+                column += colspan
+
+            if values:
+                width = max(values) + 1
+                rows.append([values.get(column, "") for column in range(width)])
+            active_rowspans = {
+                occupied_column: (text, remaining_rows - 1)
+                for occupied_column, (text, remaining_rows) in active_rowspans.items()
+                if remaining_rows > 1
+            }
+            active_rowspans.update(new_rowspans)
 
     if not rows:
         return ""

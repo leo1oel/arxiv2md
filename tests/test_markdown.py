@@ -115,6 +115,174 @@ def test_table_inside_figure() -> None:
     assert "| Prune SW | 19.80 | 39.60 |" in markdown
 
 
+def test_table_repeats_rowspan_and_colspan_values_over_the_logical_grid() -> None:
+    """Merged HTML cells keep their meaning in every covered Markdown slot."""
+    html = """
+    <table class="ltx_tabular ltx_align_middle">
+        <tr>
+            <th rowspan="2" class="ltx_td">Category</th>
+            <th rowspan="2" class="ltx_td">Model</th>
+            <th colspan="2" class="ltx_td">Score</th>
+        </tr>
+        <tr><th>Easy</th><th>Hard</th></tr>
+        <tr><td rowspan="2">Base</td><td>A</td><td>1</td><td>2</td></tr>
+        <tr><td>B</td><td>3</td><td>4</td></tr>
+        <tr><td></td><td>C</td><td>5</td><td>6</td></tr>
+    </table>
+    """
+
+    markdown = convert_fragment_to_markdown(html)
+
+    assert markdown == "\n".join(
+        [
+            "| Category | Model | Score | Score |",
+            "| --- | --- | --- | --- |",
+            "| Category | Model | Easy | Hard |",
+            "| Base | A | 1 | 2 |",
+            "| Base | B | 3 | 4 |",
+            "|  | C | 5 | 6 |",
+        ]
+    )
+
+
+def test_wide_table_keeps_every_metric_and_variant_in_its_source_column() -> None:
+    """Regression for C-RADIOv4 Table 5 (arXiv 2601.17237v1)."""
+    html = """
+    <table class="ltx_tabular">
+        <tr>
+            <td></td>
+            <th rowspan="2">Model</th>
+            <th colspan="8">SA-Co/Gold Instance Segmentation (cgF1)</th>
+        </tr>
+        <tr>
+            <td></td><th>metaclip_nps</th><th>sa1b_nps</th><th>crowded</th>
+            <th>fg_food</th><th>fg_sports_equipment</th><th>attributes</th>
+            <th>wiki_common</th><th>Avg</th>
+        </tr>
+        <tr><td></td><td>SAM3</td><td>47.3</td><td>53.7</td><td>61.1</td><td>53.4</td><td>65.5</td><td>54.9</td><td>42.5</td><td>54.1</td></tr>
+        <tr><td rowspan="4">C-RADIOv4</td><td>SO400M-VDT8</td><td>43.0</td><td>44.5</td><td>54.9</td><td>38.4</td><td>38.4</td><td>40.3</td><td>22.2</td><td>40.3</td></tr>
+        <tr><td>SO400M-G</td><td>43.8</td><td>45.7</td><td>55.9</td><td>40.1</td><td>39.8</td><td>41.6</td><td>23.1</td><td>41.4</td></tr>
+        <tr><td>H-VDT8</td><td>45.2</td><td>48.1</td><td>56.6</td><td>40.3</td><td>45.3</td><td>44.0</td><td>26.2</td><td>43.7</td></tr>
+        <tr><td>H-VDT12</td><td>45.6</td><td>48.4</td><td>57.3</td><td>40.2</td><td>46.1</td><td>45.2</td><td>26.7</td><td>44.2</td></tr>
+        <tr><td></td><td>H-G</td><td>45.9</td><td>48.8</td><td>57.4</td><td>40.9</td><td>46.5</td><td>45.9</td><td>27.3</td><td>44.7</td></tr>
+    </table>
+    """
+
+    markdown = convert_fragment_to_markdown(html)
+    lines = markdown.splitlines()
+
+    assert all(line.count("|") == 11 for line in lines)
+    assert lines[2] == "|  | Model | metaclip_nps | sa1b_nps | crowded | fg_food | fg_sports_equipment | attributes | wiki_common | Avg |"
+    assert lines[4] == "| C-RADIOv4 | SO400M-VDT8 | 43.0 | 44.5 | 54.9 | 38.4 | 38.4 | 40.3 | 22.2 | 40.3 |"
+    assert lines[5] == "| C-RADIOv4 | SO400M-G | 43.8 | 45.7 | 55.9 | 40.1 | 39.8 | 41.6 | 23.1 | 41.4 |"
+    assert lines[7] == "| C-RADIOv4 | H-VDT12 | 45.6 | 48.4 | 57.3 | 40.2 | 46.1 | 45.2 | 26.7 | 44.2 |"
+    assert lines[8] == "|  | H-G | 45.9 | 48.8 | 57.4 | 40.9 | 46.5 | 45.9 | 27.3 | 44.7 |"
+
+
+def test_table_handles_multiple_active_spans_and_real_empty_cells() -> None:
+    """Independent spans never shift cells into another logical column."""
+    html = """
+    <table class="ltx_tabular">
+        <tr><th>A</th><th>B</th><th>C</th><th>D</th><th>E</th></tr>
+        <tr>
+            <td rowspan="3">left</td>
+            <td>one</td>
+            <td rowspan="2" colspan="2">middle</td>
+            <td>right-1</td>
+        </tr>
+        <tr><td>two</td><td>right-2</td></tr>
+        <tr><td colspan="2"></td><td>four</td><td>right-3</td></tr>
+    </table>
+    """
+
+    markdown = convert_fragment_to_markdown(html)
+
+    assert markdown.splitlines() == [
+        "| A | B | C | D | E |",
+        "| --- | --- | --- | --- | --- |",
+        "| left | one | middle | middle | right-1 |",
+        "| left | two | middle | middle | right-2 |",
+        "| left |  |  | four | right-3 |",
+    ]
+
+
+def test_malformed_overlapping_spans_do_not_shift_following_cells() -> None:
+    html = """
+    <table class="ltx_tabular">
+        <tr><th>A</th><th>B</th><th>C</th></tr>
+        <tr><td>left</td><td rowspan="2">middle</td><td>right</td></tr>
+        <tr><td colspan="2">wide</td><td>after</td></tr>
+    </table>
+    """
+
+    markdown = convert_fragment_to_markdown(html)
+
+    assert markdown.splitlines() == [
+        "| A | B | C |",
+        "| --- | --- | --- |",
+        "| left | middle | right |",
+        "| wide | middle | after |",
+    ]
+
+
+def test_table_rowspan_zero_extends_to_the_end_of_its_row_group() -> None:
+    html = """
+    <table class="ltx_tabular">
+        <thead>
+            <tr><th>Group A</th><th>Group B</th><th>Value</th></tr>
+        </thead>
+        <tbody>
+            <tr><td rowspan="0" colspan="2">all</td><td>1</td></tr>
+            <tr><td>2</td></tr>
+            <tr><td>3</td></tr>
+        </tbody>
+    </table>
+    """
+
+    markdown = convert_fragment_to_markdown(html)
+
+    assert markdown.splitlines() == [
+        "| Group A | Group B | Value |",
+        "| --- | --- | --- |",
+        "| all | all | 1 |",
+        "| all | all | 2 |",
+        "| all | all | 3 |",
+    ]
+
+
+def test_table_escapes_pipes_according_to_preceding_backslash_parity() -> None:
+    html = r"""
+    <table class="ltx_tabular">
+        <tr><th colspan="2">zero | one \| two \\| three \\\|</th></tr>
+        <tr><td>1</td><td>2</td></tr>
+    </table>
+    """
+
+    markdown = convert_fragment_to_markdown(html)
+
+    assert markdown.splitlines() == [
+        r"| zero \| one \| two \\\| three \\\| | zero \| one \| two \\\| three \\\| |",
+        "| --- | --- |",
+        "| 1 | 2 |",
+    ]
+
+
+def test_table_clamps_oversized_spans_and_defaults_invalid_spans_to_one() -> None:
+    html = """
+    <table class="ltx_tabular">
+        <tr><th colspan="1000000000">wide</th></tr>
+        <tr><td colspan="invalid">one</td><td colspan="-2">two</td></tr>
+    </table>
+    """
+
+    markdown = convert_fragment_to_markdown(html)
+    lines = markdown.splitlines()
+
+    assert lines[0].count("|") == 1_001
+    assert lines[2].startswith("| one | two |")
+    assert len(lines[2].split("|")) == 1_002
+
+
 def test_remove_inline_citations_citep() -> None:
     """Test that parenthetical citations (citep) are fully removed."""
     html = (
