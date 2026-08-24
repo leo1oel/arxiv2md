@@ -405,3 +405,99 @@ def test_figure_preserves_anchor_caption_and_all_images_as_markdown() -> None:
     assert "![First](https://ar5iv.labs.arxiv.org/html/a.png)" in result
     assert "![Second](https://ar5iv.labs.arxiv.org/html/b.png)" in result
     assert "*Figure 1: Two panels.*" in result
+
+
+def test_flex_figure_preserves_rows_widths_panel_captions_and_anchors() -> None:
+    html = """
+    <figure id="S2.F1" class="ltx_figure">
+      <div class="ltx_flex_figure">
+        <div class="ltx_flex_cell ltx_flex_size_2">
+          <figure id="S2.F1.sf1" class="ltx_figure ltx_figure_panel">
+            <img src="first.png" alt="First panel">
+            <figcaption>(a) Swiss Roll</figcaption>
+          </figure>
+        </div>
+        <div class="ltx_flex_cell ltx_flex_size_2">
+          <figure id="S2.F1.sf2" class="ltx_figure ltx_figure_panel">
+            <img src="second.png" alt="Second panel">
+            <figcaption>(b) Torus</figcaption>
+          </figure>
+        </div>
+        <div class="ltx_flex_break"></div>
+        <div class="ltx_flex_cell ltx_flex_size_1">
+          <figure id="S2.F1.sf3" class="ltx_figure ltx_figure_panel">
+            <img src="third.png" alt="Third panel">
+          </figure>
+        </div>
+      </div>
+      <figcaption>Figure 1: Manifold examples.</figcaption>
+    </figure>
+    """
+
+    result = convert_fragment_to_markdown(html, base_url="https://arxiv.org/html/1234.5678v1")
+
+    assert result == "\n".join(
+        [
+            '<PaperFigure id="S2.F1">',
+            "",
+            '<PaperFigureRow columns="2 2">',
+            "",
+            '<PaperFigurePanel id="S2.F1.sf1">',
+            "",
+            "![First panel](https://arxiv.org/html/first.png)",
+            "",
+            "*(a) Swiss Roll*",
+            "",
+            "</PaperFigurePanel>",
+            "",
+            '<PaperFigurePanel id="S2.F1.sf2">',
+            "",
+            "![Second panel](https://arxiv.org/html/second.png)",
+            "",
+            "*(b) Torus*",
+            "",
+            "</PaperFigurePanel>",
+            "",
+            "</PaperFigureRow>",
+            "",
+            '<PaperFigureRow columns="1">',
+            "",
+            '<PaperFigurePanel id="S2.F1.sf3">',
+            "",
+            "![Third panel](https://arxiv.org/html/third.png)",
+            "",
+            "</PaperFigurePanel>",
+            "",
+            "</PaperFigureRow>",
+            "",
+            "*Figure 1: Manifold examples.*",
+            "",
+            "</PaperFigure>",
+        ]
+    )
+
+
+def test_flex_figure_wraps_cells_when_their_latexml_widths_fill_a_row() -> None:
+    cells = "".join(
+        f'<div class="ltx_flex_cell ltx_flex_size_3"><figure class="ltx_figure_panel"><img src="{index}.png"></figure></div>'
+        for index in range(6)
+    )
+
+    result = convert_fragment_to_markdown(f'<figure><div class="ltx_flex_figure">{cells}</div></figure>')
+
+    assert result.count('<PaperFigureRow columns="3 3 3">') == 2
+    assert result.count("<PaperFigurePanel>") == 6
+
+
+def test_flex_figure_omits_the_width_for_an_empty_panel() -> None:
+    html = """
+    <figure><div class="ltx_flex_figure">
+      <div class="ltx_flex_cell ltx_flex_size_3"><figure class="ltx_figure_panel"></figure></div>
+      <div class="ltx_flex_cell ltx_flex_size_2"><figure class="ltx_figure_panel"><img src="panel.png"></figure></div>
+    </div></figure>
+    """
+
+    result = convert_fragment_to_markdown(html)
+
+    assert '<PaperFigureRow columns="2">' in result
+    assert '<PaperFigureRow columns="3 2">' not in result

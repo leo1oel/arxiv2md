@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import re
 from collections.abc import Callable
 from urllib.parse import urljoin
@@ -547,6 +548,13 @@ def _serialize_figure(figure: Tag, *, remove_inline_citations: bool = False) -> 
     figure_classes = " ".join(figure.get("class", []))
     is_table_figure = "ltx_table" in figure_classes
 
+    flex_figure = _serialize_flex_figure(
+        figure,
+        remove_inline_citations=remove_inline_citations,
+    )
+    if flex_figure:
+        return flex_figure
+
     caption_tag = figure.find("figcaption")
     caption = _normalize_text(_serialize_inline(caption_tag, remove_inline_citations=remove_inline_citations)) if caption_tag else ""
 
@@ -577,6 +585,149 @@ def _serialize_figure(figure: Tag, *, remove_inline_citations: bool = False) -> 
     body = "\n\n".join(lines).strip()
     figure_id = figure.get("id")
     return (f'<a id="{figure_id}"></a>\n\n' + body) if figure_id and body else body
+
+
+def _serialize_flex_figure(figure: Tag, *, remove_inline_citations: bool = False) -> str:
+    """Preserve LaTeXML's multi-panel figure rows as structured MDX.
+
+    ``ltx_flex_size_N`` means a cell occupies one Nth of the figure width,
+    while ``ltx_flex_break`` forces a new row. Plain Markdown has no figure
+    layout syntax, so emit explicit structural components rather than flattening
+    every panel into an unrelated image paragraph. Consumers that understand
+    the components can recreate the source rows; text-only consumers still see
+    ordinary Markdown images and captions inside them.
+    """
+    flex_containers = [
+        child
+        for child in figure.children
+        if isinstance(child, Tag) and "ltx_flex_figure" in child.get("class", [])
+    ]
+    if not flex_containers:
+        return ""
+
+    body: list[str] = []
+    for child in figure.children:
+        if not isinstance(child, Tag):
+            continue
+        if "ltx_flex_figure" in child.get("class", []):
+            for cells in _flex_figure_rows(child):
+                panels: list[tuple[str, int]] = []
+                for cell, denominator in cells:
+                    panel = _serialize_flex_panel(
+                        cell,
+                        remove_inline_citations=remove_inline_citations,
+                    )
+                    if panel:
+                        panels.append((panel, denominator))
+                if not panels:
+                    continue
+                columns = " ".join(str(denominator) for _panel, denominator in panels)
+                body.append(
+                    f'<PaperFigureRow columns="{columns}">\n\n'
+                    + "\n\n".join(panel for panel, _denominator in panels)
+                    + "\n\n</PaperFigureRow>"
+                )
+        elif child.name == "figcaption":
+            caption = _figure_caption(child, remove_inline_citations=remove_inline_citations)
+            if caption:
+                body.append(f"*{caption}*")
+
+    if not body:
+        return ""
+    figure_id = figure.get("id")
+    id_attr = f' id="{html.escape(str(figure_id), quote=True)}"' if figure_id else ""
+    return f"<PaperFigure{id_attr}>\n\n" + "\n\n".join(body) + "\n\n</PaperFigure>"
+
+
+def _flex_figure_rows(container: Tag) -> list[list[tuple[Tag, int]]]:
+    """Split flex cells at explicit breaks and at the browser's wrap point."""
+    groups: list[list[Tag]] = []
+    current: list[Tag] = []
+    for child in container.children:
+        if not isinstance(child, Tag):
+            continue
+        classes = child.get("class", [])
+        if "ltx_flex_break" in classes:
+            if current:
+                groups.append(current)
+                current = []
+            continue
+        if "ltx_flex_cell" in classes:
+            current.append(child)
+    if current:
+        groups.append(current)
+
+    rows: list[list[tuple[Tag, int]]] = []
+    for group in groups:
+        fallback = max(1, len(group))
+        row: list[tuple[Tag, int]] = []
+        occupied = 0.0
+        for cell in group:
+            denominator = _flex_cell_denominator(cell) or fallback
+            width = 1 / denominator
+            if row and occupied + width > 1.000_001:
+                rows.append(row)
+                row = []
+                occupied = 0.0
+            row.append((cell, denominator))
+            occupied += width
+        if row:
+            rows.append(row)
+    return rows
+
+
+def _flex_cell_denominator(cell: Tag) -> int | None:
+    for class_name in cell.get("class", []):
+        match = re.fullmatch(r"ltx_flex_size_(\d+)", class_name)
+        if match:
+            value = int(match.group(1))
+            if value > 0:
+                return value
+    return None
+
+
+def _serialize_flex_panel(cell: Tag, *, remove_inline_citations: bool = False) -> str:
+    panel = next(
+        (
+            child
+            for child in cell.children
+            if isinstance(child, Tag)
+            and child.name == "figure"
+            and "ltx_figure_panel" in child.get("class", [])
+        ),
+        cell,
+    )
+    content: list[str] = []
+    for element in panel.find_all(["img", "figcaption"]):
+        if element.name == "img":
+            src = element.get("src")
+            if not src:
+                continue
+            alt = str(element.get("alt") or "Figure")
+            content.append(f"![{alt}]({src})")
+        else:
+            caption = _figure_caption(element, remove_inline_citations=remove_inline_citations)
+            if caption:
+                content.append(f"*{caption}*")
+    if not content:
+        return ""
+
+    panel_id = panel.get("id")
+    id_attr = f' id="{html.escape(str(panel_id), quote=True)}"' if panel_id else ""
+    return (
+        f"<PaperFigurePanel{id_attr}>\n\n"
+        + "\n\n".join(content)
+        + "\n\n</PaperFigurePanel>"
+    )
+
+
+def _figure_caption(caption: Tag, *, remove_inline_citations: bool = False) -> str:
+    return _normalize_text(
+        _serialize_inline(
+            caption,
+            remove_inline_citations=remove_inline_citations,
+        )
+    )
 
 
 def _normalize_text(text: str) -> str:
