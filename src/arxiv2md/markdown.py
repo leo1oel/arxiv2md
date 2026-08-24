@@ -611,20 +611,17 @@ def _serialize_flex_figure(figure: Tag, *, remove_inline_citations: bool = False
             continue
         if "ltx_flex_figure" in child.get("class", []):
             for cells in _flex_figure_rows(child):
-                panels: list[tuple[str, int]] = []
-                for cell, denominator in cells:
-                    panel = _serialize_flex_panel(
+                panels = [
+                    _serialize_flex_panel(
                         cell,
                         remove_inline_citations=remove_inline_citations,
                     )
-                    if panel:
-                        panels.append((panel, denominator))
-                if not panels:
-                    continue
-                columns = " ".join(str(denominator) for _panel, denominator in panels)
+                    for cell, _denominator in cells
+                ]
+                columns = " ".join(str(denominator) for _cell, denominator in cells)
                 body.append(
                     f'<PaperFigureRow columns="{columns}">\n\n'
-                    + "\n\n".join(panel for panel, _denominator in panels)
+                    + "\n\n".join(panels)
                     + "\n\n</PaperFigureRow>"
                 )
         elif child.name == "figcaption":
@@ -709,11 +706,14 @@ def _serialize_flex_panel(cell: Tag, *, remove_inline_citations: bool = False) -
             caption = _figure_caption(element, remove_inline_citations=remove_inline_citations)
             if caption:
                 content.append(f"*{caption}*")
-    if not content:
-        return ""
 
     panel_id = panel.get("id")
     id_attr = f' id="{html.escape(str(panel_id), quote=True)}"' if panel_id else ""
+    if not content:
+        # LaTeXML uses empty flex cells as intentional layout placeholders.
+        # Figure 3 in arXiv:2311.03757, for example, reserves the first third
+        # of its top row so the two visible panels occupy the middle and right.
+        return f"<PaperFigurePanel{id_attr}>\n</PaperFigurePanel>"
     return (
         f"<PaperFigurePanel{id_attr}>\n\n"
         + "\n\n".join(content)

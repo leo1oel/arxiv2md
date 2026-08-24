@@ -489,15 +489,18 @@ def test_flex_figure_wraps_cells_when_their_latexml_widths_fill_a_row() -> None:
     assert result.count("<PaperFigurePanel>") == 6
 
 
-def test_flex_figure_omits_the_width_for_an_empty_panel() -> None:
+def test_flex_figure_preserves_an_empty_panel_as_a_layout_placeholder() -> None:
     html = """
     <figure><div class="ltx_flex_figure">
-      <div class="ltx_flex_cell ltx_flex_size_3"><figure class="ltx_figure_panel"></figure></div>
-      <div class="ltx_flex_cell ltx_flex_size_2"><figure class="ltx_figure_panel"><img src="panel.png"></figure></div>
+      <div class="ltx_flex_cell ltx_flex_size_3"><figure id="placeholder" class="ltx_figure_panel"></figure></div>
+      <div class="ltx_flex_cell ltx_flex_size_3"><figure class="ltx_figure_panel"><img src="middle.png"></figure></div>
+      <div class="ltx_flex_cell ltx_flex_size_3"><figure class="ltx_figure_panel"><img src="right.png"></figure></div>
     </div></figure>
     """
 
     result = convert_fragment_to_markdown(html)
 
-    assert '<PaperFigureRow columns="2">' in result
-    assert '<PaperFigureRow columns="3 2">' not in result
+    assert '<PaperFigureRow columns="3 3 3">' in result
+    assert '<PaperFigurePanel id="placeholder">\n</PaperFigurePanel>' in result
+    assert result.count("<PaperFigurePanel") == 3
+    assert result.index('id="placeholder"') < result.index("middle.png") < result.index("right.png")
