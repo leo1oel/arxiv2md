@@ -106,6 +106,22 @@ def test_document_base_url_accepts_an_absolute_base() -> None:
     assert base == "https://cdn.example.com/paper/"
 
 
+def test_resolve_asset_url_restores_latexml_dotted_figure_directory() -> None:
+    # The current arXiv HTML response has no <base> and its URL has no trailing
+    # slash, even though paper assets live below that URL as a directory.
+    base = "https://arxiv.org/html/2411.04996"
+    source = "https://Figures.HandDraw/chameleon.png"
+    assert resolve_asset_url(base, source) == (
+        "https://arxiv.org/html/2411.04996/Figures.HandDraw/chameleon.png"
+    )
+
+
+def test_resolve_asset_url_keeps_real_external_hosts_unchanged() -> None:
+    base = "https://arxiv.org/html/2411.04996v2/"
+    source = "https://figures.example.com/chameleon.png"
+    assert resolve_asset_url(base, source) == source
+
+
 @pytest.mark.asyncio
 async def test_materializer_trusts_the_signature_over_a_mislabelled_content_type(tmp_path) -> None:
     # arXiv names the type after the file name, so a PNG an author saved as

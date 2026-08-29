@@ -5,13 +5,14 @@ from __future__ import annotations
 import html
 import re
 from collections.abc import Callable
-from urllib.parse import urljoin
 
 try:
     from bs4 import BeautifulSoup
     from bs4.element import NavigableString, Tag
 except ImportError as exc:  # pragma: no cover - runtime dependency check
     raise RuntimeError("BeautifulSoup4 is required for HTML parsing (pip install beautifulsoup4).") from exc
+
+from arxiv2md.assets import resolve_asset_url
 
 
 _EQUATION_TABLE_RE = re.compile(r"ltx_equationgroup|ltx_eqn_align|ltx_eqn_table")
@@ -190,8 +191,8 @@ def _resolve_image_urls(root: BeautifulSoup, base_url: str) -> None:
     """Resolve relative ``<img src>`` attributes to absolute URLs."""
     for img in root.find_all("img"):
         src = img.get("src")
-        if src and not src.startswith(("http://", "https://", "data:")):
-            img["src"] = urljoin(base_url, src)
+        if src and not src.startswith("data:"):
+            img["src"] = resolve_asset_url(base_url, src)
 
 
 def _remove_all_attributes(tag: Tag) -> None:

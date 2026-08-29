@@ -364,6 +364,23 @@ def test_absolute_image_urls_unchanged() -> None:
     assert "https://arxiv.org/html/2501.11120v1/assets/img.png" in result
 
 
+def test_latexml_dotted_figure_directory_is_restored_to_the_paper_origin() -> None:
+    html = (
+        '<figure><img src="https://Figures.Hand.Highlight/loss.png" alt="Loss">'
+        "</figure>"
+    )
+
+    result = convert_fragment_to_markdown(
+        html,
+        base_url="https://arxiv.org/html/2411.04996",
+    )
+
+    assert result == (
+        "![Loss](https://arxiv.org/html/2411.04996/"
+        "Figures.Hand.Highlight/loss.png)"
+    )
+
+
 def test_no_base_url_preserves_relative_paths() -> None:
     """Test that without base_url, relative paths are preserved as-is."""
     html = """

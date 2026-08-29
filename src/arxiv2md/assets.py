@@ -118,7 +118,29 @@ def document_base_url(response_url: str, base_href: str | None) -> str:
 
 
 def resolve_asset_url(source_url: str, src: str) -> str:
-    """Resolve an image URL against the document's base URL."""
+    """Resolve an image URL against the document's base URL.
+
+    LaTeXML mistakes dotted source directories such as
+    ``Figures.HandDraw/chameleon.png`` for hostnames and arXiv publishes the
+    result as ``https://Figures.HandDraw/chameleon.png``. The files still live
+    beside the paper HTML. Restore that specific malformed shape before the
+    normal URL join so the asset remains on arXiv's trusted origin.
+    """
+    parsed = urlparse(src)
+    host_parts = parsed.netloc.split(".")
+    if (
+        parsed.scheme == "https"
+        and len(host_parts) >= 2
+        and host_parts[0] == "Figures"
+        and any(character.isupper() for character in host_parts[-1])
+        and urlparse(source_url).hostname in TRUSTED_HOSTS
+    ):
+        relative = parsed.netloc + parsed.path
+        if parsed.query:
+            relative += f"?{parsed.query}"
+        if parsed.fragment:
+            relative += f"#{parsed.fragment}"
+        return urljoin(f"{source_url.rstrip('/')}/", relative)
     return urljoin(source_url, src)
 
 
@@ -269,5 +291,3 @@ def _validate_url(url: str) -> None:
     parsed = urlparse(url)
     if parsed.scheme != "https" or parsed.hostname not in TRUSTED_HOSTS or parsed.username or parsed.password:
         raise ValueError(f"Untrusted asset URL: {url}")
-
-
