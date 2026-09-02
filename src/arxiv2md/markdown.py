@@ -190,6 +190,9 @@ def _repair_rotated_row_group_spans(table: Tag) -> None:
 def _resolve_image_urls(root: BeautifulSoup, base_url: str) -> None:
     """Resolve relative ``<img src>`` attributes to absolute URLs."""
     for img in root.find_all("img"):
+        if img.has_attr("data-arxiv2md-local-asset"):
+            del img["data-arxiv2md-local-asset"]
+            continue
         src = img.get("src")
         if src and not src.startswith("data:"):
             img["src"] = resolve_asset_url(base_url, src)

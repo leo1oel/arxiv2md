@@ -18,7 +18,13 @@ logger = get_logger(__name__)
 CONVERTER = "arxiv2markdown"
 MANIFEST_SCHEMA = 1
 TRUSTED_HOSTS = {"arxiv.org", "www.arxiv.org", "ar5iv.labs.arxiv.org"}
-MIME_EXTENSIONS = {"image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif", "image/webp": ".webp"}
+MIME_EXTENSIONS = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+    "image/svg+xml": ".svg",
+}
 
 
 class UnusableAsset(Exception):
@@ -163,7 +169,7 @@ class AssetLimits:
 
 
 class AssetMaterializer:
-    """Download validated raster images and map source URLs to local paths."""
+    """Materialize paper images and map their source references to local paths."""
 
     def __init__(self, output_file: Path, *, limits: AssetLimits = AssetLimits(), transport: httpx.AsyncBaseTransport | None = None, compress: bool = False) -> None:
         self.output_file = output_file.resolve()
@@ -179,17 +185,59 @@ class AssetMaterializer:
                 raise ValueError("Compressing assets requires Pillow") from exc
         self.compress = compress
         self._references: dict[str, str] = {}
+        self._inline_entries: list[dict[str, object]] = []
+        self._inline_size = 0
 
     def __call__(self, source_url: str) -> str:
         return self._references.get(source_url, source_url)
 
+    def materialize_inline_svg(self, svg: str, source_id: str | None = None) -> str:
+        """Store one LaTeXML inline picture as a standalone SVG asset.
+
+        arXiv emits TikZ/PGF figures as inline ``svg.ltx_picture`` elements,
+        not remote ``img`` URLs. They still belong in the same verified paper
+        bundle, but vector bytes should bypass raster sniffing and WebP
+        compression so plots, labels and thin strokes remain exact.
+        """
+        data = svg.encode("utf-8")
+        if len(data) > self.limits.max_file_bytes:
+            raise ValueError("Inline SVG exceeds the per-file limit")
+        if len(self._inline_entries) >= self.limits.max_count:
+            raise ValueError(f"Asset count exceeds limit ({self.limits.max_count})")
+        if self._inline_size + len(data) > self.limits.max_total_bytes:
+            raise ValueError("Assets exceed total download limit")
+
+        self.assets_dir.mkdir(parents=True, exist_ok=True)
+        root = self.assets_dir.resolve()
+        digest = hashlib.sha256(data).hexdigest()
+        index = len(self._inline_entries) + 1
+        name = f"figure-inline-{index:03d}-{digest[:12]}.svg"
+        destination = (root / name).resolve()
+        if root not in destination.parents:
+            raise ValueError("Asset path escapes output directory")
+        destination.write_bytes(data)
+        relative = destination.relative_to(self.output_file.parent).as_posix()
+        source = f"inline-svg:{source_id or digest[:12]}"
+        self._inline_entries.append(
+            {
+                "source": source,
+                "resolved_source": source,
+                "path": relative,
+                "type": "image/svg+xml",
+                "size": len(data),
+                "sha256": digest,
+            }
+        )
+        self._inline_size += len(data)
+        return relative
+
     async def materialize(self, source_urls: list[str]) -> None:
         unique = list(dict.fromkeys(source_urls))
-        if len(unique) > self.limits.max_count:
+        if len(unique) + len(self._inline_entries) > self.limits.max_count:
             raise ValueError(f"Asset count exceeds limit ({self.limits.max_count})")
         self.assets_dir.mkdir(parents=True, exist_ok=True)
         root = self.assets_dir.resolve()
-        total = 0
+        total = self._inline_size
         semaphore = asyncio.Semaphore(self.limits.max_concurrency)
 
         async def fetch(source: str) -> tuple[bytes, str, str]:
@@ -253,7 +301,7 @@ class AssetMaterializer:
         # Everything ordering-sensitive — figure numbering, reference mapping,
         # the manifest — happens down here in source order, exactly as the
         # serial loop did it.
-        entries: list[dict[str, object]] = []
+        entries = list(self._inline_entries)
         for index, (source, result) in enumerate(zip(unique, results), 1):
             if isinstance(result, UnusableAsset):
                 continue

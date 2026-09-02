@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from bs4 import BeautifulSoup
+from bs4.element import Tag
 
 from arxiv2md.assets import AssetMaterializer, document_base_url, resolve_asset_url
 from arxiv2md.fetch import fetch_arxiv_html
@@ -59,6 +60,8 @@ async def ingest_paper(
         asset_urls: list[str] = []
         for section in filtered_sections:
             _collect_asset_urls(section, source_url, asset_urls)
+        for section in filtered_sections:
+            _materialize_inline_svg_assets(section, asset_materializer)
         await asset_materializer.materialize(asset_urls)
 
     for section in filtered_sections:
@@ -104,3 +107,50 @@ def _collect_asset_urls(section, base_url: str, urls: list[str]) -> None:
                 urls.append(resolved)
     for child in section.children:
         _collect_asset_urls(child, base_url, urls)
+
+
+def _materialize_inline_svg_assets(section, materializer: AssetMaterializer) -> None:
+    """Replace LaTeXML's inline vector pictures with local image references."""
+    if section.html and "<svg" in section.html.lower():
+        # html.parser lowercases SVG's case-sensitive viewBox, foreignObject,
+        # and clipPath names. html5lib understands foreign content and keeps
+        # those names intact when the vector is serialized as its own file.
+        soup = BeautifulSoup(section.html, "html5lib")
+        changed = False
+        for svg in soup.select("svg.ltx_picture"):
+            svg["xmlns"] = "http://www.w3.org/2000/svg"
+            # Namespaces implicit in HTML need to become explicit now that the
+            # fragment will be parsed as standalone XML by an <img> element.
+            for foreign_object in svg.find_all("foreignObject"):
+                html_root = next(
+                    (
+                        child
+                        for child in foreign_object.children
+                        if isinstance(child, Tag)
+                    ),
+                    None,
+                )
+                if html_root is not None:
+                    html_root["xmlns"] = "http://www.w3.org/1999/xhtml"
+            for math in svg.find_all("math"):
+                math["xmlns"] = "http://www.w3.org/1998/Math/MathML"
+
+            reference = materializer.materialize_inline_svg(
+                str(svg),
+                str(svg.get("id")) if svg.get("id") else None,
+            )
+            image = soup.new_tag("img", src=reference)
+            label = svg.get("aria-label") or svg.get("alt")
+            if label:
+                image["alt"] = str(label)
+            # The Markdown pass resolves ordinary relative arXiv images
+            # against the source page. Mark this generated local reference so
+            # it remains inside the downloaded paper bundle instead.
+            image["data-arxiv2md-local-asset"] = ""
+            svg.replace_with(image)
+            changed = True
+        if changed:
+            root = soup.body or soup
+            section.html = "".join(str(child) for child in root.contents)
+    for child in section.children:
+        _materialize_inline_svg_assets(child, materializer)

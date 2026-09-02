@@ -229,3 +229,26 @@ async def test_materializer_leaves_assets_alone_without_the_flag(tmp_path) -> No
     source = "https://arxiv.org/html/2106.09685v2/x1.png"
     await materializer.materialize([source])
     assert materializer(source).endswith(".png")
+
+
+@pytest.mark.asyncio
+async def test_materializer_keeps_inline_svg_as_vector_when_compressing(tmp_path) -> None:
+    svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"><path d="M0 0h1v1z"/></svg>'
+    materializer = AssetMaterializer(tmp_path / "paper.md", compress=True)
+
+    reference = materializer.materialize_inline_svg(svg, "S4.F6.sf1.pic1")
+    await materializer.materialize([])
+
+    assert reference.endswith(".svg")
+    assert (tmp_path / reference).read_text() == svg
+    manifest = json.loads((tmp_path / "paper_assets/manifest.json").read_text())
+    assert manifest["assets"] == [
+        {
+            "source": "inline-svg:S4.F6.sf1.pic1",
+            "resolved_source": "inline-svg:S4.F6.sf1.pic1",
+            "path": reference,
+            "type": "image/svg+xml",
+            "size": len(svg.encode()),
+            "sha256": hashlib.sha256(svg.encode()).hexdigest(),
+        }
+    ]
