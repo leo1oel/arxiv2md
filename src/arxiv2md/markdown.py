@@ -78,6 +78,7 @@ def convert_fragment_to_markdown(html: str, *, remove_inline_citations: bool = F
     """
     soup = BeautifulSoup(html, "html.parser")
     _strip_unwanted_elements(soup)
+    _replace_external_svg_objects(soup)
     _convert_equation_tables(soup)
     convert_all_mathml_to_latex(soup)
     fix_tabular_tables(soup)
@@ -88,6 +89,23 @@ def convert_fragment_to_markdown(html: str, *, remove_inline_citations: bool = F
             image["src"] = asset_materializer(str(image["src"]))
     blocks = _serialize_children(soup, remove_inline_citations=remove_inline_citations)
     return "\n\n".join(block for block in blocks if block).strip()
+
+
+def _replace_external_svg_objects(root: BeautifulSoup) -> None:
+    """Put LaTeXML's external SVG figures on the normal image path."""
+    for image_object in root.find_all("object", data=True):
+        media_type = str(image_object.get("type", "")).partition(";")[0].strip().lower()
+        if media_type != "image/svg+xml":
+            continue
+        image = root.new_tag("img", src=str(image_object["data"]))
+        label = (
+            image_object.get("aria-label")
+            or image_object.get("title")
+            or image_object.get("alt")
+        )
+        if label:
+            image["alt"] = str(label)
+        image_object.replace_with(image)
 
 
 def _find_document_root(soup: BeautifulSoup) -> Tag:

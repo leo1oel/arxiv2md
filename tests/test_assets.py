@@ -11,6 +11,7 @@ import pytest
 from arxiv2md.assets import AssetLimits, AssetMaterializer, document_base_url, recompress_to_webp, resolve_asset_url, sniff_image_type
 
 PNG = b"\x89PNG\r\n\x1a\ncontent"
+SVG = b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"><path d="M0 0h1v1z"/></svg>'
 
 
 @pytest.mark.asyncio
@@ -141,6 +142,7 @@ def test_sniff_image_type_recognizes_each_supported_format() -> None:
     assert sniff_image_type(b"\xff\xd8\xff\xe0rest") == "image/jpeg"
     assert sniff_image_type(b"GIF89a rest") == "image/gif"
     assert sniff_image_type(b"RIFF\x00\x00\x00\x00WEBPrest") == "image/webp"
+    assert sniff_image_type(b"<?xml version='1.0'?>\n" + SVG) == "image/svg+xml"
     assert sniff_image_type(b"<html>not an image</html>") is None
 
 
@@ -229,6 +231,35 @@ async def test_materializer_leaves_assets_alone_without_the_flag(tmp_path) -> No
     source = "https://arxiv.org/html/2106.09685v2/x1.png"
     await materializer.materialize([source])
     assert materializer(source).endswith(".png")
+
+
+@pytest.mark.asyncio
+async def test_materializer_keeps_remote_svg_as_vector_when_compressing(tmp_path) -> None:
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(
+            200,
+            headers={"content-type": "image/svg+xml"},
+            content=SVG,
+        )
+    )
+    materializer = AssetMaterializer(
+        tmp_path / "paper.md",
+        transport=transport,
+        compress=True,
+    )
+    source = "https://arxiv.org/html/2609.01607v1/svg_vqa_accuracy.svg"
+
+    await materializer.materialize([source])
+
+    reference = materializer(source)
+    assert reference.endswith(".svg")
+    assert (tmp_path / reference).read_bytes() == SVG
+    entry = json.loads((tmp_path / "paper_assets/manifest.json").read_text())["assets"][0]
+    assert entry["source"] == source
+    assert entry["resolved_source"] == source
+    assert entry["type"] == "image/svg+xml"
+    assert entry["size"] == len(SVG)
+    assert entry["sha256"] == hashlib.sha256(SVG).hexdigest()
 
 
 @pytest.mark.asyncio

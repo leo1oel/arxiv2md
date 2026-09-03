@@ -424,6 +424,26 @@ def test_figure_preserves_anchor_caption_and_all_images_as_markdown() -> None:
     assert "*Figure 1: Two panels.*" in result
 
 
+def test_external_svg_object_is_preserved_as_a_markdown_image() -> None:
+    html = """
+    <figure id="S4.F6" class="ltx_figure"><div class="ltx_flex_figure">
+      <div class="ltx_flex_cell ltx_flex_size_2">
+        <div class="ltx_figure_panel">
+          <object type="image/svg+xml" data="svg_vqa_accuracy.svg"></object>
+        </div>
+      </div>
+    </div><figcaption>Figure 6: SVG diagnostics.</figcaption></figure>
+    """
+
+    result = convert_fragment_to_markdown(
+        html,
+        base_url="https://arxiv.org/html/2609.01607v1/",
+    )
+
+    assert "![Figure](https://arxiv.org/html/2609.01607v1/svg_vqa_accuracy.svg)" in result
+    assert "*Figure 6: SVG diagnostics.*" in result
+
+
 def test_flex_figure_preserves_rows_widths_panel_captions_and_anchors() -> None:
     html = """
     <figure id="S2.F1" class="ltx_figure">

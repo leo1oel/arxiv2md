@@ -34,6 +34,22 @@ def test_collect_asset_urls_skips_inline_data_images() -> None:
     assert urls == ["https://arxiv.org/html/2106.09685v2/x1.png"]
 
 
+def test_collect_asset_urls_includes_external_svg_objects() -> None:
+    section = _section(
+        """
+        <object type="image/svg+xml" data="svg_vqa_accuracy.svg"></object>
+        <object type="application/pdf" data="appendix.pdf"></object>
+        """
+    )
+    urls: list[str] = []
+
+    _collect_asset_urls(section, "https://arxiv.org/html/2609.01607v1/", urls)
+
+    assert urls == [
+        "https://arxiv.org/html/2609.01607v1/svg_vqa_accuracy.svg",
+    ]
+
+
 async def test_inline_latexml_svg_survives_inside_its_figure_panel(tmp_path) -> None:
     section = _section(
         """

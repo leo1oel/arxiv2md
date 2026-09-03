@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
@@ -25,6 +26,10 @@ MIME_EXTENSIONS = {
     "image/webp": ".webp",
     "image/svg+xml": ".svg",
 }
+_SVG_ROOT = re.compile(
+    rb"\A(?:\xef\xbb\xbf)?\s*(?:<\?xml\b.*?\?>\s*)?(?:<!--.*?-->\s*)*<svg(?:\s|>)",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 class UnusableAsset(Exception):
@@ -61,6 +66,11 @@ def sniff_image_type(data: bytes) -> str | None:
         return "image/gif"
     if len(data) >= 12 and data.startswith(b"RIFF") and data[8:12] == b"WEBP":
         return "image/webp"
+    # arXiv serves LaTeXML's external vector plots as standalone SVG files.
+    # Check the bounded document prefix rather than trusting Content-Type;
+    # XML declarations and comments may precede the root element.
+    if _SVG_ROOT.match(data[:8192]):
+        return "image/svg+xml"
     return None
 
 
@@ -277,7 +287,7 @@ class AssetMaterializer:
             # describes what is on disk, not what arrived. On a thread because
             # WebP method=6 is deliberately slow — encoded inline it would
             # stall the event loop and serialize the downloads again.
-            if self.compress:
+            if self.compress and content_type != "image/svg+xml":
                 recompressed = await asyncio.to_thread(recompress_to_webp, data)
                 if recompressed is not None:
                     data, content_type = recompressed

@@ -105,6 +105,16 @@ def _collect_asset_urls(section, base_url: str, urls: list[str]) -> None:
             # the whole paper on its untrusted-URL check.
             if resolved.startswith(("http://", "https://")):
                 urls.append(resolved)
+        # LaTeXML emits some vector figures as external SVG objects rather
+        # than images. Restrict this to the declared image type so embedded
+        # PDFs or other object payloads never enter the asset downloader.
+        for image in soup.find_all("object", data=True):
+            media_type = str(image.get("type", "")).partition(";")[0].strip().lower()
+            if media_type != "image/svg+xml":
+                continue
+            resolved = resolve_asset_url(base_url, str(image["data"]))
+            if resolved.startswith(("http://", "https://")):
+                urls.append(resolved)
     for child in section.children:
         _collect_asset_urls(child, base_url, urls)
 
