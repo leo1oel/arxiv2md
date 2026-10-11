@@ -335,6 +335,9 @@ def _serialize_inline(node: Tag | NavigableString, *, remove_inline_citations: b
     if node.name == "br":
         return "\n"
 
+    if node.name == "img":
+        return _inline_image(node)
+
     if node.name in {"em", "i"}:
         return f"*{_serialize_children_inline(node, remove_inline_citations=remove_inline_citations)}*"
 
@@ -577,30 +580,23 @@ def _serialize_figure(figure: Tag, *, remove_inline_citations: bool = False) -> 
     if flex_figure:
         return flex_figure
 
-    caption_tag = figure.find("figcaption")
+    caption_tag = figure.find("figcaption", recursive=False) or figure.find("figcaption")
     caption = _normalize_text(_serialize_inline(caption_tag, remove_inline_citations=remove_inline_citations)) if caption_tag else ""
+    content = _figure_content(
+        figure,
+        caption_tag=caption_tag,
+        image_alt=caption or "Figure",
+        remove_inline_citations=remove_inline_citations,
+    )
 
     lines = []
 
     if is_table_figure:
-        # Handle table figures - find and serialize the embedded table
-        # Note: fix_tabular_tables strips attributes, so search for any table element
-        table = figure.find("table")
-        if table:
-            table_md = _serialize_table(table, remove_inline_citations=remove_inline_citations)
-            if caption:
-                lines.append(f"**{caption}**")
-            if table_md:
-                lines.append(table_md)
-        elif caption:
-            # Fallback if no table found but has caption
-            lines.append(f"Table: {caption}")
+        if caption:
+            lines.append(f"**{caption}**" if content else f"Table: {caption}")
+        lines.extend(content)
     else:
-        # Handle regular image figures
-        for img in figure.find_all("img"):
-            src = img.get("src")
-            if src:
-                lines.append(f"![{img.get('alt') or caption or 'Figure'}]({src})")
+        lines.extend(content)
         if caption:
             lines.append(f"*{caption}*")
 
@@ -716,18 +712,11 @@ def _serialize_flex_panel(cell: Tag, *, remove_inline_citations: bool = False) -
         ),
         cell,
     )
-    content: list[str] = []
-    for element in panel.find_all(["img", "figcaption"]):
-        if element.name == "img":
-            src = element.get("src")
-            if not src:
-                continue
-            alt = str(element.get("alt") or "Figure")
-            content.append(f"![{alt}]({src})")
-        else:
-            caption = _figure_caption(element, remove_inline_citations=remove_inline_citations)
-            if caption:
-                content.append(f"*{caption}*")
+    content = _figure_content(
+        panel,
+        image_alt="Figure",
+        remove_inline_citations=remove_inline_citations,
+    )
 
     panel_id = panel.get("id")
     id_attr = f' id="{html.escape(str(panel_id), quote=True)}"' if panel_id else ""
@@ -741,6 +730,71 @@ def _serialize_flex_panel(cell: Tag, *, remove_inline_citations: bool = False) -
         + "\n\n".join(content)
         + "\n\n</PaperFigurePanel>"
     )
+
+
+def _figure_content(
+    container: Tag,
+    *,
+    image_alt: str,
+    caption_tag: Tag | None = None,
+    remove_inline_citations: bool = False,
+) -> list[str]:
+    """Serialize a figure's images, tables and sub-figure captions in order.
+
+    LaTeXML nests whatever the author put in a (sub)figure: a panel may be a
+    ``tabular`` rather than a graphic (Figure 3(b) of arXiv:2501.03225), and
+    a table figure may hold several tables or loose graphics. Elements inside
+    a table belong to that table's cells, and elements inside a caption to the
+    caption, so neither is emitted twice.
+    """
+    content: list[str] = []
+    for element in container.find_all(["img", "table", "figcaption"]):
+        if element is caption_tag or _nested_in(element, {"table", "figcaption"}, container):
+            continue
+        if element.name == "img":
+            src = element.get("src")
+            if src:
+                content.append(f"![{_image_alt(element, image_alt)}]({src})")
+        elif element.name == "table":
+            table = _serialize_table(element, remove_inline_citations=remove_inline_citations)
+            if table:
+                content.append(table)
+        else:
+            caption = _figure_caption(element, remove_inline_citations=remove_inline_citations)
+            if caption:
+                content.append(f"*{caption}*")
+    return content
+
+
+def _nested_in(element: Tag, names: set[str], container: Tag) -> bool:
+    for parent in element.parents:
+        if parent is container:
+            return False
+        if parent.name in names:
+            return True
+    return False
+
+
+def _image_alt(image: Tag, fallback: str) -> str:
+    return _normalize_text(str(image.get("alt") or "")) or fallback
+
+
+def _inline_image(image: Tag) -> str:
+    """An image inside running text or a table cell.
+
+    Figures fill their column, but an inline graphic was typeset at a size
+    LaTeXML records as ``width``: a 64 px thumbnail in a table cell is often a
+    336 px source file. Markdown image syntax has no size, so keep the paper's
+    width with the HTML form Markdown allows inline.
+    """
+    src = image.get("src")
+    if not src:
+        return ""
+    alt = _image_alt(image, "Image")
+    width = str(image.get("width", "")).strip()
+    if not width.isdigit() or int(width) <= 0:
+        return f"![{alt}]({src})"
+    return f'<img src="{html.escape(str(src))}" alt="{html.escape(alt)}" width="{int(width)}">'
 
 
 def _figure_caption(caption: Tag, *, remove_inline_citations: bool = False) -> str:
