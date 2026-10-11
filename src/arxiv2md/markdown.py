@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import json
 import re
 from collections.abc import Callable
 
@@ -254,6 +255,9 @@ def _serialize_block(tag: Tag, *, remove_inline_citations: bool = False) -> list
     if "arxiv2md_equations" in tag.get("class", []):
         return [tag.get_text()]
 
+    if "ltx_note" in tag.get("class", []):
+        return _serialize_block_note(tag, remove_inline_citations=remove_inline_citations)
+
     if tag.name in {"section", "article", "div", "span"}:
         return _serialize_children(tag, remove_inline_citations=remove_inline_citations)
 
@@ -290,6 +294,47 @@ def _serialize_block(tag: Tag, *, remove_inline_citations: bool = False) -> list
         return []
 
     return _serialize_children(tag, remove_inline_citations=remove_inline_citations)
+
+
+def _serialize_block_note(note: Tag, *, remove_inline_citations: bool = False) -> list[str]:
+    """A note LaTeXML set between paragraphs rather than inside one.
+
+    A ``\\marginpar`` can hold a whole figure: an image and its caption
+    (Figure 4 of arXiv:2311.03757). Walked as an ordinary span it lost both,
+    since block traversal skips bare text and has no image case. The note's
+    mark and its "margin:" label are typesetting, not content.
+    """
+    content = note.find(class_="ltx_note_content") or note
+    blocks: list[str] = []
+    for element in content.find_all(_is_note_block):
+        if any(_is_note_block(parent) for parent in _parents_within(element, content)):
+            continue
+        if element.name == "img":
+            src = element.get("src")
+            block = f"![{_image_alt(element, 'Figure')}]({src})" if src else ""
+        elif element.name == "table":
+            block = _serialize_table(element, remove_inline_citations=remove_inline_citations)
+        elif "ltx_caption" in element.get("class", []):
+            caption = _figure_caption(element, remove_inline_citations=remove_inline_citations)
+            block = f"*{caption}*" if caption else ""
+        else:
+            block = _serialize_paragraph(element, remove_inline_citations=remove_inline_citations)
+        if block:
+            blocks.append(block)
+    return blocks
+
+
+def _is_note_block(tag: Tag) -> bool:
+    return tag.name in {"img", "table"} or bool({"ltx_p", "ltx_caption"}.intersection(tag.get("class", [])))
+
+
+def _parents_within(element: Tag, container: Tag) -> list[Tag]:
+    parents: list[Tag] = []
+    for parent in element.parents:
+        if parent is container:
+            break
+        parents.append(parent)
+    return parents
 
 
 def _serialize_abstract(tag: Tag) -> list[str]:
@@ -447,6 +492,11 @@ def _serialize_table(table: Tag, *, remove_inline_citations: bool = False) -> st
     # GFM has no merged-cell syntax. Expand each merged cell over every logical
     # slot it covers and repeat its text there. Repetition makes row and column
     # meaning explicit to both Markdown renderers and text-only consumers.
+    # Each merge is also recorded as a candidate span, so Lattice can draw the
+    # cell once instead of repeating it (a rowspan image in LLaVA's Table 1
+    # showed again on every row it covers).
+    candidates: list[tuple[int, list[int], int, int]] = []
+    group_ends: list[int] = []
     active_rowspans: dict[int, tuple[str, int]] = {}
     for row_group in row_groups:
         active_rowspans = {}
@@ -486,6 +536,8 @@ def _serialize_table(table: Tag, *, remove_inline_citations: bool = False) -> st
                 if remaining_rows:
                     for occupied_column in owned_columns:
                         new_rowspans[occupied_column] = (cell_text, remaining_rows)
+                if owned_columns and (remaining_rows or len(owned_columns) > 1):
+                    candidates.append((len(rows), owned_columns, remaining_rows + 1, len(group_ends)))
                 column += colspan
 
             if values:
@@ -497,6 +549,7 @@ def _serialize_table(table: Tag, *, remove_inline_citations: bool = False) -> st
                 if remaining_rows > 1
             }
             active_rowspans.update(new_rowspans)
+        group_ends.append(len(rows))
 
     if not rows:
         return ""
@@ -510,7 +563,47 @@ def _serialize_table(table: Tag, *, remove_inline_citations: bool = False) -> st
     ]
     for row in normalized[1:]:
         lines.append("| " + " | ".join(row) + " |")
+    spans = _fitting_spans(normalized, candidates, group_ends)
+    if spans:
+        lines[:0] = [_layout_marker(spans), ""]
     return "\n".join(lines)
+
+
+def _fitting_spans(
+    grid: list[list[str]],
+    candidates: list[tuple[int, list[int], int, int]],
+    group_ends: list[int],
+) -> list[list[int]]:
+    """The merges Lattice's table-layout marker can carry, as ``[row, col, rowspan, colspan]``.
+
+    Lattice rejects the whole marker, and shows it as a raw comment beside an
+    unmerged table, when one span leaves the grid, overlaps another or covers
+    a cell whose text differs from its origin's. Expansion above already
+    repeats the text, but a merge can be clipped by an earlier rowspan or end
+    at its row group, so each candidate is trimmed to what was emitted and
+    any that still does not fit is left repeated.
+    """
+    spans: list[list[int]] = []
+    taken: set[tuple[int, int]] = set()
+    for row, columns, rowspan, group in candidates:
+        if columns != list(range(columns[0], columns[-1] + 1)):
+            continue
+        height = min(rowspan, group_ends[group] - row)
+        cells = [(r, c) for r in range(row, row + height) for c in columns]
+        if len(cells) < 2 or any(cell in taken for cell in cells):
+            continue
+        origin = grid[row][columns[0]]
+        if any(grid[r][c] != origin for r, c in cells):
+            continue
+        taken.update(cells)
+        spans.append([row, columns[0], height, len(columns)])
+    return spans
+
+
+def _layout_marker(spans: list[list[int]]) -> str:
+    """Lattice's ``lattice-table-layout:v1`` comment: compact JSON, spans in reading order."""
+    ordered = sorted(spans, key=lambda span: (span[0], span[1]))
+    return f'<!-- lattice-table-layout:v1 {json.dumps({"spans": ordered}, separators=(",", ":"))} -->'
 
 
 def _convert_equation_tables(root: BeautifulSoup) -> None:

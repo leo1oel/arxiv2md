@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import re
+from collections.abc import Container
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
@@ -195,11 +197,31 @@ class AssetMaterializer:
                 raise ValueError("Compressing assets requires Pillow") from exc
         self.compress = compress
         self._references: dict[str, str] = {}
+        self._types: dict[str, str] = {}
+        self._embedded: dict[str, str] = {}
         self._inline_entries: list[dict[str, object]] = []
         self._inline_size = 0
+        self._downloaded_entries: list[dict[str, object]] = []
+        self._downloaded_size = 0
+        self._skipped: list[dict[str, object]] = []
 
     def __call__(self, source_url: str) -> str:
         return self._references.get(source_url, source_url)
+
+    def data_uri(self, source_url: str) -> str | None:
+        """A downloaded figure as a ``data:`` URI, or None if it was not downloaded.
+
+        An SVG shown through ``<img>`` loads nothing outside itself, so a photo
+        inside a boxed example (a tcolorbox LaTeXML draws as an inline SVG
+        picture) only survives with its bytes written into the picture.
+        """
+        if source_url in self._embedded:
+            return self._embedded[source_url]
+        reference = self._references.get(source_url)
+        if reference is None:
+            return None
+        data = (self.output_file.parent / reference).read_bytes()
+        return f"data:{self._types[source_url]};base64,{base64.b64encode(data).decode('ascii')}"
 
     def materialize_inline_svg(self, svg: str, source_id: str | None = None) -> str:
         """Store one LaTeXML inline picture as a standalone SVG asset.
@@ -212,9 +234,9 @@ class AssetMaterializer:
         data = svg.encode("utf-8")
         if len(data) > self.limits.max_file_bytes:
             raise ValueError("Inline SVG exceeds the per-file limit")
-        if len(self._inline_entries) >= self.limits.max_count:
+        if len(self._inline_entries) + len(self._downloaded_entries) >= self.limits.max_count:
             raise ValueError(f"Asset count exceeds limit ({self.limits.max_count})")
-        if self._inline_size + len(data) > self.limits.max_total_bytes:
+        if self._inline_size + self._downloaded_size + len(data) > self.limits.max_total_bytes:
             raise ValueError("Assets exceed total download limit")
 
         self.assets_dir.mkdir(parents=True, exist_ok=True)
@@ -239,9 +261,11 @@ class AssetMaterializer:
             }
         )
         self._inline_size += len(data)
+        self._write_manifest()
         return relative
 
-    async def materialize(self, source_urls: list[str]) -> None:
+    async def materialize(self, source_urls: list[str], *, embed_only: Container[str] = frozenset()) -> None:
+        """Download figures; those in ``embed_only`` are kept for ``data_uri`` rather than written."""
         unique = list(dict.fromkeys(source_urls))
         if len(unique) + len(self._inline_entries) > self.limits.max_count:
             raise ValueError(f"Asset count exceeds limit ({self.limits.max_count})")
@@ -301,21 +325,23 @@ class AssetMaterializer:
         # that invalidate the whole run stop it; a figure that could not be
         # fetched is recorded and left out, and its Markdown keeps pointing at
         # the original URL.
-        skipped: list[dict[str, object]] = []
         for source, result in zip(unique, results):
             if isinstance(result, UnusableAsset):
                 logger.warning("Skipping figure %s: %s", result.source, result.reason)
-                skipped.append({"source": source, "reason": result.reason})
+                self._skipped.append({"source": source, "reason": result.reason})
             elif isinstance(result, BaseException):
                 raise result
         # Everything ordering-sensitive — figure numbering, reference mapping,
         # the manifest — happens down here in source order, exactly as the
         # serial loop did it.
-        entries = list(self._inline_entries)
         for index, (source, result) in enumerate(zip(unique, results), 1):
             if isinstance(result, UnusableAsset):
                 continue
             data, content_type, final_url = result
+            if source in embed_only:
+                # Only an inline picture shows it, and it carries the bytes.
+                self._embedded[source] = f"data:{content_type};base64,{base64.b64encode(data).decode('ascii')}"
+                continue
             extension = MIME_EXTENSIONS[content_type]
             digest = hashlib.sha256(data).hexdigest()
             name = f"figure-{index:03d}-{digest[:12]}{extension}"
@@ -325,9 +351,18 @@ class AssetMaterializer:
             destination.write_bytes(data)
             relative = destination.relative_to(self.output_file.parent).as_posix()
             self._references[source] = relative
-            entries.append({"source": source, "resolved_source": final_url, "path": relative, "type": content_type, "size": len(data), "sha256": digest})
-        manifest = {"schema_version": MANIFEST_SCHEMA, "converter": CONVERTER, "converter_version": "0.1.0", "assets": entries, "skipped": skipped}
-        (root / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            self._types[source] = content_type
+            self._downloaded_entries.append({"source": source, "resolved_source": final_url, "path": relative, "type": content_type, "size": len(data), "sha256": digest})
+            self._downloaded_size += len(data)
+        self._write_manifest()
+
+    def _write_manifest(self) -> None:
+        # Inline pictures can be stored before or after the downloads (one that
+        # embeds a downloaded photo has to wait for it), so the manifest is
+        # rewritten whenever either changes and always lists both.
+        entries = self._inline_entries + self._downloaded_entries
+        manifest = {"schema_version": MANIFEST_SCHEMA, "converter": CONVERTER, "converter_version": "0.1.0", "assets": entries, "skipped": self._skipped}
+        (self.assets_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
     async def _get_following_safe_redirects(self, client: httpx.AsyncClient, url: str) -> tuple[httpx.Response, str]:
         current = url

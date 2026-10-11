@@ -32,6 +32,7 @@ class ParsedArxivHtml:
     abstract: str | None
     sections: list[SectionNode]
     base_href: str | None = None
+    front_html: str | None = None
 
 
 def parse_arxiv_html(html: str) -> ParsedArxivHtml:
@@ -44,8 +45,41 @@ def parse_arxiv_html(html: str) -> ParsedArxivHtml:
     abstract = _extract_abstract(soup)
     sections = _extract_sections(document_root)
     base_href = _extract_base_href(soup)
+    front_html = _extract_front_html(document_root)
 
-    return ParsedArxivHtml(title=title, authors=authors, abstract=abstract, sections=sections, base_href=base_href)
+    return ParsedArxivHtml(title=title, authors=authors, abstract=abstract, sections=sections, base_href=base_href, front_html=front_html)
+
+
+# Front-of-paper blocks that already have their own place in the output
+# (title, authors, abstract), are page furniture, or are author footnote text
+# LaTeXML hoists out of the author block.
+_FRONT_SKIP_CLASSES = {"ltx_title_document", "ltx_authors", "ltx_abstract", "ltx_TOC", "ltx_pagination", "ltx_note"}
+
+
+def _extract_front_html(root: Tag) -> str | None:
+    """Content between the title block and the first section.
+
+    Sections only hold what follows their heading, so anything an author put
+    after the abstract and before \\section{Introduction} had no section to
+    land in: a teaser figure (Figure 1 of arXiv:2407.06438 and
+    arXiv:2502.13923) or a table of project links (arXiv:2406.16860).
+    Elements before the title are skipped: LaTeXML puts unexpanded class
+    macros there (``\\reportnumber`` in arXiv:2501.12948), not paper content.
+    """
+    children = [child for child in root.children if isinstance(child, Tag)]
+    title = next((child for child in children if "ltx_title_document" in child.get("class", [])), None)
+    if title is not None:
+        children = children[children.index(title) + 1 :]
+    parts: list[str] = []
+    for child in children:
+        if child.name == "section":
+            break
+        # A block with a heading of its own (keywords) is already a section.
+        if child.name == "nav" or _FRONT_SKIP_CLASSES.intersection(child.get("class", [])) or child.find(_HEADING_RE):
+            continue
+        parts.append(str(child))
+    html = "".join(parts).strip()
+    return html or None
 
 
 def _extract_base_href(soup: BeautifulSoup) -> str | None:

@@ -135,6 +135,8 @@ def test_table_repeats_rowspan_and_colspan_values_over_the_logical_grid() -> Non
 
     assert markdown == "\n".join(
         [
+            '<!-- lattice-table-layout:v1 {"spans":[[0,0,2,1],[0,1,2,1],[0,2,1,2],[2,0,2,1]]} -->',
+            "",
             "| Category | Model | Score | Score |",
             "| --- | --- | --- | --- |",
             "| Category | Model | Easy | Hard |",
@@ -169,8 +171,10 @@ def test_wide_table_keeps_every_metric_and_variant_in_its_source_column() -> Non
     """
 
     markdown = convert_fragment_to_markdown(html)
-    lines = markdown.splitlines()
+    marker, blank, *lines = markdown.splitlines()
 
+    assert marker == '<!-- lattice-table-layout:v1 {"spans":[[0,1,2,1],[0,2,1,8],[3,0,5,1]]} -->'
+    assert blank == ""
     assert all(line.count("|") == 11 for line in lines)
     assert lines[2] == "|  | Model | metaclip_nps | sa1b_nps | crowded | fg_food | fg_sports_equipment | attributes | wiki_common | Avg |"
     assert lines[4] == "| C-RADIOv4 | SO400M-VDT8 | 43.0 | 44.5 | 54.9 | 38.4 | 38.4 | 40.3 | 22.2 | 40.3 |"
@@ -198,6 +202,8 @@ def test_table_handles_multiple_active_spans_and_real_empty_cells() -> None:
     markdown = convert_fragment_to_markdown(html)
 
     assert markdown.splitlines() == [
+        '<!-- lattice-table-layout:v1 {"spans":[[1,0,3,1],[1,2,2,2],[3,1,1,2]]} -->',
+        "",
         "| A | B | C | D | E |",
         "| --- | --- | --- | --- | --- |",
         "| left | one | middle | middle | right-1 |",
@@ -217,7 +223,10 @@ def test_malformed_overlapping_spans_do_not_shift_following_cells() -> None:
 
     markdown = convert_fragment_to_markdown(html)
 
+    # "wide" loses its second column to "middle"'s rowspan, so only "middle" merges.
     assert markdown.splitlines() == [
+        '<!-- lattice-table-layout:v1 {"spans":[[1,1,2,1]]} -->',
+        "",
         "| A | B | C |",
         "| --- | --- | --- |",
         "| left | middle | right |",
@@ -242,6 +251,8 @@ def test_table_rowspan_zero_extends_to_the_end_of_its_row_group() -> None:
     markdown = convert_fragment_to_markdown(html)
 
     assert markdown.splitlines() == [
+        '<!-- lattice-table-layout:v1 {"spans":[[1,0,3,2]]} -->',
+        "",
         "| Group A | Group B | Value |",
         "| --- | --- | --- |",
         "| all | all | 1 |",
@@ -261,6 +272,8 @@ def test_table_escapes_pipes_according_to_preceding_backslash_parity() -> None:
     markdown = convert_fragment_to_markdown(html)
 
     assert markdown.splitlines() == [
+        '<!-- lattice-table-layout:v1 {"spans":[[0,0,1,2]]} -->',
+        "",
         r"| zero \| one \| two \\\| three \\\| | zero \| one \| two \\\| three \\\| |",
         "| --- | --- |",
         "| 1 | 2 |",
@@ -276,8 +289,9 @@ def test_table_clamps_oversized_spans_and_defaults_invalid_spans_to_one() -> Non
     """
 
     markdown = convert_fragment_to_markdown(html)
-    lines = markdown.splitlines()
+    marker, _blank, *lines = markdown.splitlines()
 
+    assert marker == '<!-- lattice-table-layout:v1 {"spans":[[0,0,1,1000]]} -->'
     assert lines[0].count("|") == 1_001
     assert lines[2].startswith("| one | two |")
     assert len(lines[2].split("|")) == 1_002

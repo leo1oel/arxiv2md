@@ -26,6 +26,7 @@ def format_paper(
     include_toc: bool,
     include_abstract_in_tree: bool = True,
     include_frontmatter: bool = False,
+    front_matter: str | None = None,
 ) -> IngestionResult:
     """Create summary, section tree, and content."""
     tree_lines = ["Sections:"]
@@ -33,7 +34,7 @@ def format_paper(
         tree_lines.append("Abstract")
     tree_lines.append(_create_sections_tree(sections))
     tree = "\n".join(tree_lines)
-    content = _render_content(abstract=abstract, sections=sections, include_toc=include_toc)
+    content = _render_content(abstract=abstract, front_matter=front_matter, sections=sections, include_toc=include_toc)
 
     section_count = count_sections(sections)
     token_estimate = _format_token_count(tree + "\n" + content)
@@ -111,6 +112,7 @@ def _render_content(
     abstract: str | None,
     sections: list[SectionNode],
     include_toc: bool,
+    front_matter: str | None = None,
 ) -> str:
     blocks: list[str] = []
     if include_toc:
@@ -121,6 +123,11 @@ def _render_content(
     if abstract:
         blocks.append("## Abstract")
         blocks.append(abstract.strip())
+
+    # Content set between the abstract and the first section (a teaser
+    # figure, a links table) keeps its place in reading order.
+    if front_matter:
+        blocks.append(front_matter.strip())
 
     for section in sections:
         blocks.extend(_render_section(section))

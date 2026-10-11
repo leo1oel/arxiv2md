@@ -12,7 +12,7 @@ from arxiv2md.fetch import fetch_arxiv_html
 from arxiv2md.html_parser import parse_arxiv_html
 from arxiv2md.markdown import convert_fragment_to_markdown
 from arxiv2md.output_formatter import format_paper
-from arxiv2md.schemas import IngestionResult
+from arxiv2md.schemas import IngestionResult, SectionNode
 from arxiv2md.sections import filter_sections
 
 _REFERENCE_TITLES = ("references", "bibliography")
@@ -56,15 +56,21 @@ async def ingest_paper(
     else:  # include mode
         include_abstract = not sections or _ABSTRACT_TITLE in selected_lower
 
+    # What precedes the first section travels with the abstract: the front of
+    # the paper is either wanted or not.
+    front = SectionNode(title="", level=1, html=parsed.front_html) if include_abstract and parsed.front_html else None
+    converted = filtered_sections + ([front] if front else [])
+
     if asset_materializer:
         asset_urls: list[str] = []
-        for section in filtered_sections:
+        for section in converted:
             _collect_asset_urls(section, source_url, asset_urls)
-        for section in filtered_sections:
-            _materialize_inline_svg_assets(section, asset_materializer)
-        await asset_materializer.materialize(asset_urls)
+        # Downloads first: an inline picture embeds the photos it frames.
+        await asset_materializer.materialize(asset_urls, embed_only=_picture_only_urls(converted, source_url))
+        for section in converted:
+            _materialize_inline_svg_assets(section, asset_materializer, base_url=source_url)
 
-    for section in filtered_sections:
+    for section in converted:
         _populate_section_markdown(section, remove_inline_citations=remove_inline_citations, base_url=source_url, asset_materializer=asset_materializer)
 
     result = format_paper(
@@ -73,6 +79,7 @@ async def ingest_paper(
         title=parsed.title,
         authors=parsed.authors,
         abstract=parsed.abstract if include_abstract else None,
+        front_matter=front.markdown if front else None,
         sections=filtered_sections,
         include_toc=not remove_toc,
         include_abstract_in_tree=parsed.abstract is not None,
@@ -119,7 +126,31 @@ def _collect_asset_urls(section, base_url: str, urls: list[str]) -> None:
         _collect_asset_urls(child, base_url, urls)
 
 
-def _materialize_inline_svg_assets(section, materializer: AssetMaterializer) -> None:
+def _picture_only_urls(sections, base_url: str) -> set[str]:
+    """Images shown only inside inline SVG pictures, which embed them.
+
+    Written out as their own files as well, they would sit in the bundle
+    unreferenced beside the copy each picture carries.
+    """
+    framed: set[str] = set()
+    unframed: set[str] = set()
+
+    def visit(section) -> None:
+        if section.html:
+            soup = BeautifulSoup(section.html, "html.parser")
+            for image in soup.find_all("img", src=True):
+                resolved = resolve_asset_url(base_url, str(image["src"]))
+                inside = image.find_parent("svg", class_="ltx_picture") is not None
+                (framed if inside else unframed).add(resolved)
+        for child in section.children:
+            visit(child)
+
+    for section in sections:
+        visit(section)
+    return framed - unframed
+
+
+def _materialize_inline_svg_assets(section, materializer: AssetMaterializer, *, base_url: str | None = None) -> None:
     """Replace LaTeXML's inline vector pictures with local image references."""
     if section.html and "<svg" in section.html.lower():
         # html.parser lowercases SVG's case-sensitive viewBox, foreignObject,
@@ -144,6 +175,13 @@ def _materialize_inline_svg_assets(section, materializer: AssetMaterializer) -> 
                     html_root["xmlns"] = "http://www.w3.org/1999/xhtml"
             for math in svg.find_all("math"):
                 math["xmlns"] = "http://www.w3.org/1998/Math/MathML"
+            # A tcolorbox example panel is one picture with photos inside
+            # (Appendix A of arXiv:2409.12191). Their arXiv-relative URLs
+            # cannot load from a standalone SVG file shown as an image.
+            for image in svg.find_all("img", src=True):
+                embedded = materializer.data_uri(resolve_asset_url(base_url, str(image["src"]))) if base_url else None
+                if embedded:
+                    image["src"] = embedded
 
             reference = materializer.materialize_inline_svg(
                 str(svg),
@@ -163,4 +201,4 @@ def _materialize_inline_svg_assets(section, materializer: AssetMaterializer) -> 
             root = soup.body or soup
             section.html = "".join(str(child) for child in root.contents)
     for child in section.children:
-        _materialize_inline_svg_assets(child, materializer)
+        _materialize_inline_svg_assets(child, materializer, base_url=base_url)
