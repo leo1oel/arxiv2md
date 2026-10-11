@@ -106,6 +106,11 @@ def _replace_external_svg_objects(root: BeautifulSoup) -> None:
         )
         if label:
             image["alt"] = str(label)
+        # The typeset size, which an inline image keeps: a 15 px link icon
+        # (arXiv:2502.13923's links table) otherwise fills its cell.
+        for dimension in ("width", "height"):
+            if image_object.get(dimension):
+                image[dimension] = str(image_object[dimension])
         image_object.replace_with(image)
 
 
